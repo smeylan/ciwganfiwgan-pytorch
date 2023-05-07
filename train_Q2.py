@@ -25,10 +25,12 @@ import multiprocessing
 import copy
 
 class AudioDataSet:
-    def __init__(self, datadir, slice_len):
+    def __init__(self, datadir, slice_len, NUM_CATEG, timit_words):
         print("Loading data")
         dir = os.listdir(datadir)
         x = np.zeros((len(dir), 1, slice_len))
+        y = np.zeros((len(dir), NUM_CATEG+1)) # +1 for UNK
+
         i = 0
         for file in tqdm(dir):
             audio = read(os.path.join(datadir, file))[1]
@@ -44,13 +46,19 @@ class AudioDataSet:
                 raise NotImplementedError('Scipy cannot process atypical WAV files.')
             audio /= np.max(np.abs(audio))
             x[i, 0, :] = audio
+
+            # extract the label
+            word = file.split('_')[0]
+            j = timit_words.index(word)
+            y[i, j] = 1            
             i += 1
 
         self.len = len(x)
         self.audio = torch.from_numpy(np.array(x, dtype=np.float32))
+        self.labels = torch.from_numpy(np.array(y, dtype=np.float32))
 
     def __getitem__(self, index):
-        return self.audio[index]
+        return ((self.audio[index], self.labels[index]))
 
     def __len__(self):
         return self.len
@@ -70,7 +78,7 @@ def gradient_penalty(G, D, real, fake, epsilon):
     penalty = ((grad_norm - 1) ** 2).unsqueeze(1)
     return penalty
 
-def Q2(G_z, batch_size, unigrams, asr_model, timit_words, epoch_i, decoder, num_cores):
+def Q2(G_z, labels, batch_size, unigrams, asr_model, timit_words, epoch_i, decoder, num_cores):
     
     # make a directory to save all outputs for the epoch
     files_for_asr = []
@@ -78,16 +86,18 @@ def Q2(G_z, batch_size, unigrams, asr_model, timit_words, epoch_i, decoder, num_
     if not os.path.exists(epoch_path):
         os.makedirs(epoch_path)
 
+    labels_local = labels.cpu().detach().numpy()
     # for each file in the batch, write out a wavfile
     for j in range(batch_size):
-        audio_buffer = G_z[j, 0, :].detach().cpu().numpy()  
-        tf = os.path.join(epoch_path,str(uuid.uuid4())+".wav")
+        audio_buffer = G_z[j, 0, :].detach().cpu().numpy()          
+        true_word = timit_words[np.argwhere(labels_local[j,:])[0][0]]
+        tf = os.path.join(epoch_path,true_word + '_' + str(uuid.uuid4())+".wav")
         write(tf, 16000, audio_buffer)
         files_for_asr.append(copy.copy(tf))
     
     #send the audio buffer through NeMO recognizer
     # Q2 output needs to be over the 11 + 1 UNK categories
-    guesses = batch_transcribe_with_pyctcdecoder(files_for_asr, lm_path, unigrams, asr_model, decoder, num_cores)
+    guesses = batch_transcribe_with_pyctcdecoder(files_for_asr, lm_path, unigrams, asr_model, decoder, num_cores)    
 
     return(guesses)
 
@@ -100,16 +110,18 @@ def get_limited_softmax(candidates, timit_words):
     return(pd.concat([limited_logits, remainder_row]))
 
 
-def process_one_beam(beam_results_tuple, timit_words):
+def process_one_beam(beam_results_tuple, filename, timit_words):
     candidates = pd.DataFrame({'hypothesis':[x[0] for x in beam_results_tuple], 'logit_score': -1. * np.array([x[-2] for x in beam_results_tuple]), 'combined_score': -1. * np.array([x[-1] for x in beam_results_tuple])}) 
 
     if candidates.shape[0] > len(np.unique(candidates.hypothesis)):
         raise ValueError('Redundant hypotheses!')    
 
-
     words_from_lang = get_limited_softmax(candidates, timit_words)    
     rdf = pd.DataFrame({'hypothesis':timit_words}).merge(words_from_lang[['hypothesis', 'prob']], how="left") 
     rdf = rdf.fillna(0) 
+
+    rdf.to_csv(filename.replace('.wav','.csv'))
+
     return(np.array(rdf.prob.to_list()))    
 
 
@@ -128,7 +140,8 @@ def batch_transcribe_with_pyctcdecoder(files, lm_path, unigram_list, asr_model, 
         )
     print('Done decoding!')
 
-    guesses = [process_one_beam(x, timit_words) for x in  batch_beam_results_tuple]
+    guesses = [process_one_beam(x[0],x[1], timit_words) for x in  zip(batch_beam_results_tuple, files)]
+
     return(np.vstack(guesses))    
     
 
@@ -241,17 +254,20 @@ if __name__ == "__main__":
     NUM_CATEG = args.num_categ
     NUM_EPOCHS = args.num_epochs
     WAVEGAN_DISC_NUPDATES = 5
+    WAVEGAN_Q2_NUPDATES = 10
+    Q2_EPOCH_START = 3000
     BATCH_SIZE = args.batch_size
     LAMBDA = 10
     LEARNING_RATE = 1e-4
     BETA1 = 0.5
     BETA2 = 0.9
+    label_stages = False
 
     CONT = args.cont
     SAVE_INT = args.save_int
 
     # Load data
-    dataset = AudioDataSet(datadir, SLICE_LEN)
+    dataset = AudioDataSet(datadir, SLICE_LEN, NUM_CATEG, timit_words)
     dataloader = DataLoader(
         dataset,
         BATCH_SIZE,
@@ -299,7 +315,7 @@ if __name__ == "__main__":
     start_epoch = 0
     start_step = 0
 
-    if CONT.lower() != "":
+    if str(CONT).lower() != "":
         try:
             print("Loading model from existing checkpoints...")
             fname, start_epoch = get_continuation_fname(CONT, logdir)
@@ -308,12 +324,17 @@ if __name__ == "__main__":
             D.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_D.pt")))
             if train_Q:
                 Q.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Q.pt")))
+                # there is no change over time to the Q2 network
 
             optimizer_G.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Gopt.pt")))
             optimizer_D.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Dopt.pt")))
 
             if train_Q:
                 optimizer_Q.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Qopt.pt")))
+
+            if train_Q2:
+                optimizer_Q2.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Q2opt.pt")))
+
 
             start_step = int(re.search(r'_step(\d+).*', fname).group(1))
             print(f"Successfully loaded model. Continuing training from epoch {start_epoch},"
@@ -334,36 +355,43 @@ if __name__ == "__main__":
 
         print("Epoch {} of {}".format(epoch, NUM_EPOCHS))
         print("-----------------------------------------")
-        pbar = tqdm(dataloader)
-        real = dataset[:BATCH_SIZE].to(device)
+        pbar = tqdm(dataloader)        
 
-        for i, real in enumerate(pbar):
+        for i, trial in enumerate(pbar):
             # D Update
             optimizer_D.zero_grad()
-            real = real.to(device)
+            
+            reals = trial[0].to(device)
+            labels = trial[1].to(device)
+
             epsilon = torch.rand(BATCH_SIZE, 1, 1).repeat(1, 1, SLICE_LEN).to(device)
             _z = torch.FloatTensor(BATCH_SIZE, 100 - (NUM_CATEG + 1)).uniform_(-1, 1).to(device)
 
             if train_Q:
-                zeros = torch.zeros(BATCH_SIZE, 1).to(device)
+                #zeros = torch.zeros(BATCH_SIZE, 1).to(device)
                 if args.fiw:
+                    raise NotImplementedError
                     c = torch.FloatTensor(BATCH_SIZE, NUM_CATEG).bernoulli_().to(device)
                 
-                else:
-                    c = torch.nn.functional.one_hot(torch.randint(0, NUM_CATEG, (BATCH_SIZE,)),
-                                                    num_classes=NUM_CATEG).to(device)
-                z = torch.cat((c, zeros, _z), dim=1)
+                else:                    
+                    c = labels  
+                    
+                    # c = torch.nn.functional.one_hot(torch.randint(0, NUM_CATEG, (BATCH_SIZE,)),
+                    #                                 num_classes=NUM_CATEG).to(device)
+                z = torch.cat((c, _z), dim=1)
+                #z = torch.cat((c, zeros, _z), dim=1)
             else:
                 raise NotImplementedError
                 z = _z
 
             fake = G(z)
-            penalty = gradient_penalty(G, D, real, fake, epsilon)
+            penalty = gradient_penalty(G, D, reals, fake, epsilon)
 
-            D_loss = torch.mean(D(fake) - D(real) + LAMBDA * penalty)
+            D_loss = torch.mean(D(fake) - D(reals) + LAMBDA * penalty)
             writer.add_scalar('Loss/Discriminator', D_loss.detach().item(), step)
             D_loss.backward()
-            print('Discriminator update!')
+            if label_stages:
+                print('Discriminator update!')
             optimizer_D.step()            
 
             if i % WAVEGAN_DISC_NUPDATES == 0:
@@ -374,14 +402,17 @@ if __name__ == "__main__":
                 if train_Q2:    
                     optimizer_Q2.zero_grad()                    
 
-                _z = torch.FloatTensor(BATCH_SIZE, 100 - NUM_CATEG).uniform_(-1, 1).to(device)
+                _z = torch.FloatTensor(BATCH_SIZE, 100 - (NUM_CATEG + 1)).uniform_(-1, 1).to(device)
+
 
                 if train_Q:
                     if args.fiw:
-                        c = torch.FloatTensor(BATCH_SIZE, NUM_CATEG).bernoulli_().to(device)
+                        raise NotImplementedError
+                        c = torch.FloatTensor(BATCH_SIZE, NUM_CATEG).bernoulli_().to(device)                        
                     else:
-                        c = torch.nn.functional.one_hot(torch.randint(0, NUM_CATEG, (BATCH_SIZE,)),
-                                                        num_classes=NUM_CATEG).to(device)
+                        c = labels 
+                        #c = torch.nn.functional.one_hot(torch.randint(0, NUM_CATEG, (BATCH_SIZE,)),
+                        # num_classes=NUM_CATEG).to(device)
 
                     z = torch.cat((c, _z), dim=1)
                 else:
@@ -396,33 +427,39 @@ if __name__ == "__main__":
 
                 # Q Loss
                 if train_Q:                                                
-                    Q_loss = criterion_Q(Q(G_z), c)
+                    Q_loss = criterion_Q(Q(G_z), c[:,0:NUM_CATEG]) # exclude the UNK label --  child never intends to produce unk
                     Q_loss.backward()
                     writer.add_scalar('Loss/Q_Network', Q_loss.detach().item(), step)
                     optimizer_Q.step()
-                    print('Q network update!')
+                    if label_stages:
+                        print('Q network update!')
                     # based on the Q loss, update G and D, right?
 
                 # Q2 Loss: From the secondary network
-                if train_Q2:
-                    Q2_loss = criterion_Q2(torch.from_numpy(Q2(G_z, BATCH_SIZE, unigrams, asr_model, timit_words, epoch, decoder, num_cores)).to(device).requires_grad_(), c)                              
+                if (i != 0) and train_Q2 and (i % WAVEGAN_Q2_NUPDATES == 0) & (epoch >= Q2_EPOCH_START):                
+                    Q2_loss = criterion_Q2(torch.from_numpy(Q2(G_z, labels, BATCH_SIZE, unigrams, asr_model, timit_words, epoch, decoder, num_cores)).to(device).requires_grad_(), c)                              
                     Q2_loss.backward()
-                    writer.add_scalar('Loss/Q2_Network', Q2_loss, step)
+                    writer.add_scalar('Loss/Q2_Network', Q2_loss, step)                    
                     optimizer_Q2.step()
-                    print('Q2 network update!')
+                    if label_stages:
+                        print('Q2 network update!')
 
                 # Update
                 optimizer_G.step()
-                print('Generator update!')
+                if label_stages:
+                    print('Generator update!')
             step += 1
 
-        if not epoch % SAVE_INT:
+        if epoch % SAVE_INT == 0:
             torch.save(G.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_G.pt'))
             torch.save(D.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_D.pt'))
             if train_Q:
                 torch.save(Q.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_Q.pt'))
+            # these is no Q2 network to save            
 
             torch.save(optimizer_G.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_Gopt.pt'))
             torch.save(optimizer_D.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_Dopt.pt'))
             if train_Q:
                 torch.save(optimizer_Q.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_Qopt.pt'))
+            if train_Q2:
+                torch.save(optimizer_Q2.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_Q2opt.pt'))

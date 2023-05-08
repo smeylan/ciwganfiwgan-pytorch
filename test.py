@@ -7,8 +7,9 @@ Created on Sun May 29 13:05:27 2022
 import argparse
 import os
 import time
+import numpy as np
 
-import sounddevice as sd
+from scipy.io.wavfile import read, write
 # import soundfile as sf
 import torch
 
@@ -36,7 +37,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         '--epoch',
-        type=int,
+        type=str,
         required=True,
         help='Training Directory'
     )
@@ -51,8 +52,31 @@ if __name__ == "__main__":
         type=int,
         default=16384,
     )
+    parser.add_argument(
+        '--num_categ',
+        type=int,
+        default=0,
+        help='Q-net categories'
+    )
+
+    parser.add_argument(
+        '--num_sentences',
+        type=int,
+        default=10,
+        help='Number of sentences to sample'
+    )
+
+    parser.add_argument(
+        '--max_batch_size',
+        type=int,
+        default=64,
+        help='Max batch size. If num_sentences * num_categories exceeds max_batch_size, bail!'
+    )
 
     args = parser.parse_args()
+    if (args.num_sentences * args.num_categ) > args.max_batch_size:
+        raise ValueError('num_sentences * num_categories exceeds max_batch_size')
+    
     epoch = args.epoch
     dir = args.dir
     sample_rate = args.sample_rate
@@ -67,10 +91,43 @@ if __name__ == "__main__":
     G.to(device)
     G.eval()
 
-    # Generate from random noise
-    for i in range(100):
-        z = torch.FloatTensor(1, 100).uniform_(-1, 1).to(device)
-        genData = G(z)[0, 0, :].detach().cpu().numpy()
-        # write(f'out.wav', sample_rate, (genData * 32767).astype(np.int16))
-        sd.play(genData, sample_rate)
-        time.sleep(1)
+    # Generate 10 sentences from one hots
+    num_words = args.num_sentences * args.num_categ
+    
+    _z = torch.FloatTensor(num_words, 100 - (args.num_categ + 1)).uniform_(-1., 1.).to(device)
+    
+    sent = np.zeros([args.num_categ, args.num_categ], dtype=np.float32)
+    np.fill_diagonal(sent, 1., wrap=False)    
+    
+    zeros = torch.from_numpy(np.zeros([num_words,1], dtype=np.float32)).to(device)    
+    c = torch.from_numpy(np.vstack([sent for x in range(args.num_sentences)])).to(device)
+        
+    z = torch.cat((c, zeros ,_z), dim=1)
+
+    print('Generating...')
+    genData = G(z).detach().cpu().numpy()
+    # take num_sentences cuts that are each num_categ long
+    
+    print('Slicing...')
+    sentences =  [np.hstack(genData[x:x+args.num_categ]) for x in  [10*x for x in range(args.num_sentences+1)]]
+    
+    print('Adding silences...')
+    silence = np.zeros([1,4000], dtype=np.float32)
+    output_sentences = []
+    for i in range(len(sentences)):
+        output_sentences.append(sentences[i])
+        output_sentences.append(silence)
+    final = np.hstack(output_sentences)[0]
+    
+    test_sentence_dir  = 'test_sentences'
+    if not os.path.exists(test_sentence_dir):
+        os.makedirs(test_sentence_dir)
+    
+    print('Writing out the wav...')
+    output_path = os.path.join(test_sentence_dir, fname+".wav")    
+    write(output_path, 16000, final)
+    
+    # slice them up, concatenate, add some space in between., write them out
+    # write(f'out.wav', sample_rate, (genData * 32767).astype(np.int16))
+    #sd.play(genData, sample_rate)
+        

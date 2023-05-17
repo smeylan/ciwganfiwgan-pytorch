@@ -422,11 +422,11 @@ if __name__ == "__main__":
     NUM_EPOCHS = args.num_epochs
     WAVEGAN_DISC_NUPDATES = 5
     WAVEGAN_Q2_NUPDATES = 10
-    Q2_EPOCH_START = 2000
+    Q2_EPOCH_START = 1000
     WAV_OUTPUT_N = 25
     SAVE_INT = args.save_int
     PRODUCTION_START_EPOCH = 25
-    COMPREHENSION_INTERVAL = 20
+    COMPREHENSION_INTERVAL = 3
 
     # RL Parameters
     #RL_DISCOUNT_FACTOR = .99
@@ -474,14 +474,14 @@ if __name__ == "__main__":
         optimizer_G = optim.Adam(G.parameters(), lr=LEARNING_RATE, betas=(BETA1, BETA2))
         optimizer_D = optim.Adam(D.parameters(), lr=LEARNING_RATE, betas=(BETA1, BETA2))
 
-        Q, optimizer_Q, optimizer_Q2_to_Q, criterion_Q  = (None, None, None, None)
+        Q, optimizer_Q_to_G, optimizer_Q_to_Q, criterion_Q  = (None, None, None, None)
         if train_Q:
             Q = WaveGANQNetwork(slice_len=SLICE_LEN, num_categ=NUM_CATEG).to(device).train()
-            optimizer_Q = optim.RMSprop(it.chain(G.parameters(), Q.parameters()),
-                                        lr=LEARNING_RATE)
+            optimizer_Q_to_G = optim.RMSprop(G.parameters(), lr=LEARNING_RATE)
+            optimizer_Q_to_Q = optim.RMSprop(Q.parameters(), lr=LEARNING_RATE)
             # just update the G parameters
             if args.Q2:
-                optimizer_Q2_to_Q = optim.RMSprop(Q.parameters(), lr=RL_LEARNING_RATE)
+                optimizer_Q2_to_Q = optim.RMSprop(Q.parameters(), lr=LEARNING_RATE)
 
             if args.fiw:
                 print("Training a fiwGAN with ", NUM_CATEG, " categories.")
@@ -500,10 +500,10 @@ if __name__ == "__main__":
             #     criterion_QQ = None
             
 
-        return G, D, optimizer_G, optimizer_D, Q, optimizer_Q, optimizer_Q2_to_Q, criterion_Q
+        return G, D, optimizer_G, optimizer_D, Q, optimizer_Q_to_G, optimizer_Q_to_Q, optimizer_Q2_to_Q, criterion_Q
 
     # Load models
-    G, D, optimizer_G, optimizer_D, Q, optimizer_Q, optimizer_Q2_to_Q, criterion_Q = make_new()
+    G, D, optimizer_G, optimizer_D, Q, optimizer_Q_to_G, optimizer_Q_to_Q, optimizer_Q2_to_Q, criterion_Q = make_new()
         
     
     start_epoch = 0
@@ -524,7 +524,9 @@ if __name__ == "__main__":
             optimizer_D.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Dopt.pt")))
 
             if train_Q:
-                optimizer_Q.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Qopt.pt")))
+                optimizer_Q_to_G.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Q_to_Gopt.pt")))
+                optimizer_Q_to_Q.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Q_to_Qopt.pt")))
+                optimizer_Q2_to_Q.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Q2_to_Qopt.pt")))
             
 
             start_step = int(re.search(r'_step(\d+).*', fname).group(1))
@@ -560,12 +562,12 @@ if __name__ == "__main__":
                 if label_stages:
                     print('Updating Q network to identify referents')
 
-                optimizer_Q.zero_grad()
+                optimizer_Q_to_Q.zero_grad()
                 child_recovers_from_adult = Q(reals)    
                 Q_comprehension_loss = criterion_Q(child_recovers_from_adult, labels[:,0:NUM_CATEG]) # Note we exclude the UNK label --  child never intends to produce unk
                 Q_comprehension_loss.backward()
-                writer.add_scalar('Loss/Q_Network: Interpretation', Q_comprehension_loss.detach().item(), step)
-                optimizer_Q.step()
+                writer.add_scalar('Loss/Q_comprehension', Q_comprehension_loss.detach().item(), step)
+                optimizer_Q_to_Q.step()
                 step += 1
                             
 
@@ -605,16 +607,12 @@ if __name__ == "__main__":
 
                 if i % WAVEGAN_DISC_NUPDATES == 0:
                     optimizer_G.zero_grad()
-
-                    if train_Q:
-                        optimizer_Q.zero_grad()
-                    if train_Q2:    
-                        optimizer_Q2_to_Q.zero_grad()                                        
-
+                                                                
                     _z = torch.FloatTensor(BATCH_SIZE, 100 - (NUM_CATEG + 1)).uniform_(-1, 1).to(device)
 
 
                     if train_Q:
+                        optimizer_Q_to_G.zero_grad()
                         if args.fiw:
                             raise NotImplementedError
                             c = torch.FloatTensor(BATCH_SIZE, NUM_CATEG).bernoulli_().to(device)                        
@@ -694,7 +692,7 @@ if __name__ == "__main__":
                                     optimizer_Q2_to_Q.zero_grad() # clear the gradients for the Q update
                                     # update Q    
                                     print('RL trial with referent '+str(i)+', instance '+str(index_of_recognized_word))
-                                    #optimizer_Q2_to_Q.zero_grad() # clear the gradients for the Q update
+                                    #optimizer_Q_to_Q.zero_grad() # clear the gradients for the Q update
                                 
                                     # compute the expected value of each utterance
                                     # this is a one shot game for each reference, so implicitly the value before taking the action is 0. I might update this later, i.e., think about this in terms of sequences
@@ -747,16 +745,13 @@ if __name__ == "__main__":
 
                     elif train_Q:         
                         if label_stages:
-                            print('simple Q update')
+                            print('Q -> G update')
                         
-                        G_z = G(z) #generate new draw for z after the step
-                        Q_G_z = Q(G_z)                                  
-                        Q_loss = criterion_Q(Q_G_z, c[:,0:NUM_CATEG]) # Note we exclude the UNK label --  child never intends to produce unk
-                        Q_loss.backward()
-                        writer.add_scalar('Loss/Q_Network', Q_loss.detach().item(), step)
-                        optimizer_Q.step()
-                        if label_stages:
-                            print('Q network update!')                    
+                        optimizer_Q_to_G.zero_grad()
+                        Q_production_loss = criterion_Q(Q(G(z)), c[:,0:NUM_CATEG]) # Note we exclude the UNK label --  child never intends to produce unk
+                        Q_production_loss.backward()
+                        writer.add_scalar('Loss/Q_production', Q_production_loss.detach().item(), step)
+                        optimizer_Q_to_G.step()
 
                     
                 step += 1
@@ -775,6 +770,9 @@ if __name__ == "__main__":
             if optimizer_D is not None:
                 torch.save(optimizer_D.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_Dopt.pt'))
             if train_Q:
-                torch.save(optimizer_Q.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_Qopt.pt'))
+                torch.save(optimizer_Q_to_G.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_Q_to_Gopt.pt'))
+            if train_Q2 and optimizer_Q_to_Q is not None:
+                torch.save(optimizer_Q_to_Q.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_Q_to_Qopt.pt'))
             if train_Q2 and optimizer_Q2_to_Q is not None:
-                torch.save(optimizer_Q2_to_Q.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_Q2opt.pt'))
+                torch.save(optimizer_Q2_to_Q.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_Q_to_Q2opt.pt'))
+

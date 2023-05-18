@@ -207,7 +207,7 @@ def whisper_recognize_wavs(filenames, fast_whisper_model, vocab, timit_words):
     return(indices_of_recognized_words, probabilities)
 
 
-def Q2_whisper(G_z, fast_whisper_model, timit_words, vocab, epoch, batch_size, write_only=False):
+def Q2_whisper(G_z, labels, fast_whisper_model, timit_words, vocab, epoch, batch_size, write_only=False):
     # returns probabilities and a set of indices; takes a smaller number of arguments
     files_for_asr = []
     epoch_path = os.path.join("temp",str(epoch))
@@ -462,7 +462,7 @@ if __name__ == "__main__":
         dataset,
         BATCH_SIZE,
         shuffle=True,
-        num_workers=2,
+        num_workers=1,
         drop_last=True
     )
 
@@ -510,6 +510,7 @@ if __name__ == "__main__":
     start_step = 0
 
     if str(CONT).lower() != "":
+        
         try:
             print("Loading model from existing checkpoints...")
             fname, start_epoch = get_continuation_fname(CONT, logdir)
@@ -527,16 +528,13 @@ if __name__ == "__main__":
                 optimizer_Q_to_G.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Q_to_Gopt.pt")))
                 optimizer_Q_to_Q.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Q_to_Qopt.pt")))
                 optimizer_Q2_to_Q.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Q2_to_Qopt.pt")))
-            
 
             start_step = int(re.search(r'_step(\d+).*', fname).group(1))
             print(f"Successfully loaded model. Continuing training from epoch {start_epoch},"
                   f" step {start_step}")
-
-        # Don't care why it failed
-        except Exception as e:
-            print("Could not load from existing checkpoint, initializing new model...")
-            print(e)
+        except:
+            "Problem loading existing model!"
+        
     else:
         print("Starting a new training")
 
@@ -640,7 +638,7 @@ if __name__ == "__main__":
                     if (epoch % WAV_OUTPUT_N == 0) & (i <= 1) & (epoch < Q2_EPOCH_START):
                          
                         print('Sampling .wave outputs (but not running them through Q2)...')
-                        wav_output = Q2_whisper(G_z, faster_whisper_model, timit_words, vocab, epoch, BATCH_SIZE, write_only=True)
+                        wav_output = Q2_whisper(G_z, c, faster_whisper_model, timit_words, vocab, epoch, BATCH_SIZE, write_only=True)
                         # but don't do anything with it; just let it write out all of the audio files
 
                     # Q2 Loss: Update G and Q to better imitate the Q2 model
@@ -653,27 +651,33 @@ if __name__ == "__main__":
                         Q2_prediction_error = []
                         recoveries = []
                         total_recognized_words = 0
-                        
-
 
                         for i in range(NUM_CATEG):
 
-                            # generate a minibatch worth of generations
-                            selected_referents = np.zeros([Q2_BATCH_SIZE, NUM_CATEG+1], dtype=np.float32)
+                            # generate a minibatch worth of generations to choose a top n
+                            selected_referents = np.zeros([BATCH_SIZE, NUM_CATEG+1], dtype=np.float32)
                             selected_referents[:,i] = 1
                             selected_referents = torch.Tensor(selected_referents).to(device)
-                            _z = torch.FloatTensor(Q2_BATCH_SIZE, 100 - (NUM_CATEG + 1)).uniform_(-1, 1).to(device)
+                            _z = torch.FloatTensor(BATCH_SIZE, 100 - (NUM_CATEG + 1)).uniform_(-1, 1).to(device)
 
                             candidates = G(torch.cat((selected_referents, _z), dim=1))
+                            Q_applied_to_candidates = Q(candidates)
 
-                            # if we wanted to choose the top n of something in the action space, it would be here:
-                            #expected_recovery = torch.cat((Q(candidates), torch.Tensor(-10. * np.ones([BATCH_SIZE,1])).to(device)), dim=1)
+                            # select the Q2_BATCH_SIZE items that are most likely to produce the correct response
+                            predicted_values = torch.Tensor([predicted_value_loss(Q_applied_to_candidates[i], selected_referents[i,0:NUM_CATEG]) for i in range(Q_applied_to_candidates.shape[0])])
+                            # get the n best candidates from the argmax of the scores
                             
-                            #predicted_values = torch.Tensor([predicted_value_loss(expected_recovery[i], selected_referents[i]) for i in range(expected_recovery.shape[0])])
+                            print('Select the n best productions (lowest cross entropy) for this word right here')                            
+                            selected_candidate_indices = torch.argsort(predicted_values, dim=- 1, descending=False, stable=False)[0:Q2_BATCH_SIZE]
+
+                            predicted_values[torch.argsort(predicted_values, dim=- 1, descending=False, stable=False)[0:Q2_BATCH_SIZE]]
+                            selected_candidates = candidates[selected_candidate_indices,]
+
+                        
 
                             # send the candidates through Whisper
                             print('Recognizing words with Whisper model...')  
-                            indices_of_recognized_words, Q2_probs, filenames = Q2_whisper(candidates, faster_whisper_model, timit_words, vocab, epoch, Q2_BATCH_SIZE)
+                            indices_of_recognized_words, Q2_probs, filenames = Q2_whisper(selected_candidates, selected_referents, faster_whisper_model, timit_words, vocab, epoch, Q2_BATCH_SIZE)
                             total_recognized_words += len(indices_of_recognized_words)
                             
                             if label_stages:
@@ -698,8 +702,13 @@ if __name__ == "__main__":
                                     # this is a one shot game for each reference, so implicitly the value before taking the action is 0. I might update this later, i.e., think about this in terms of sequences
                                     # recall that actions were G_z / candidates ; the value function is Q(G_z)    
 
-                                    Q_prediction = torch.softmax(Q(candidates[index_of_recognized_word,]), dim=1)[0]
+                                    Q_prediction = torch.softmax(Q(selected_candidates[index_of_recognized_word,]), dim=1)[0]                                    
+                                    #Q_prediction = Q(selected_candidates[index_of_recognized_word,:])[0] # regenerate because of the zero_grad
                                     augmented_Q_prediction = torch.cat((Q_prediction, zero_tensor))
+
+                                    # is the Q prediction the same as selected_referents?
+                                    if not torch.eq(torch.argmax(selected_referents[index_of_recognized_word]), torch.argmax(augmented_Q_prediction)).detach().cpu().numpy():
+                                        print("Child model produced an utterance that they don't think will invoke the correct action. Consider choosing action from a larger set of actions")
                                                     
                                     #predicted_val = predicted_value_loss(augmented_Q_prediction, selected_referents[index_of_recognized_word])
                                                                 
@@ -710,20 +719,19 @@ if __name__ == "__main__":
 
                                     # Q2 outputs are the correct class labels
 
-                                    Q2_loss = predicted_value_loss(augmented_Q_prediction , Q2_output[index_of_recognized_word])
+                                    Q2_loss = predicted_value_loss(augmented_Q_prediction, Q2_output[index_of_recognized_word])
                                     #Q2 is prediction error of the Q network with respect to the Q2 outputs
                                     print(augmented_Q_prediction)
                                     print(Q2_output[index_of_recognized_word])
                                     print(Q2_loss)
                                 
-                                    # count the number of words correctly recovered
-                                    recovered = torch.eq(torch.argmax(labels[index_of_recognized_word]), torch.argmax(Q2_output[index_of_recognized_word])).cpu().numpy().tolist()
-                                    recoveries.append(recovered)
+                                    # count the number of words correctly recovered: referent -> recognized by listener
+                                    recovered = torch.eq(torch.argmax(selected_referents[index_of_recognized_word]), torch.argmax(Q2_output[index_of_recognized_word])).cpu().numpy().tolist()
+                                    recoveries.append(recovered)                                    
 
-                                    Q2_prediction_error.append(Q2_loss.detach().cpu().numpy())
+                                    Q2_prediction_error.append(Q2_loss.detach().cpu().numpy())                                    
                                                                                                                  
                                     Q2_loss.backward(retain_graph=True)                            
-                
                                 
                                     print('Gradients on the Q network:')
                                     print('Q layer 0: '+str(np.round(torch.sum(torch.abs(Q.downconv_0.conv.weight.grad)).cpu().numpy(), 10)))
@@ -734,8 +742,7 @@ if __name__ == "__main__":
 
                                     print('Q2 step!')
                                     optimizer_Q2_to_Q.step()
-                        
-                        
+
                         writer.add_scalar('Metric/Proportion Recovered Words Among Recognized', np.sum(recoveries) / total_recognized_words, step)
                         writer.add_scalar('Metric/Proportion Recovered Words Among Total', np.sum(recoveries) / (Q2_BATCH_SIZE *NUM_CATEG), step)
                         writer.add_scalar('Metric/Proportion Recognized Words Among Total', total_recognized_words / (Q2_BATCH_SIZE *NUM_CATEG), step)

@@ -30,12 +30,30 @@ import signal
 from Levenshtein import distance as lev
 from contextlib import contextmanager
 
+torch.autograd.set_detect_anomaly(True)
+
 # For Nemo Q2
 # import multiprocessing
 # import nemo.collections.asr as nemo_asr
 # import pyctcdecode
 # import kenlm
 
+class FNN(nn.Module):
+    def __init__(self):
+        super(FNN, self).__init__()
+        self.fc1 = nn.Linear(input_dim, 64)
+        self.fc2 = nn.Linear(64, 64)
+        self.fc3 = nn.Linear(64, 32)
+        self.fc4 = nn.Linear(32, output_dim)
+        self.relu = nn.ReLU()
+        self.softmax = nn.Softmax(dim=1)
+
+    def forward(self, x):
+        x = self.relu(self.fc1(x))
+        x = self.relu(self.fc2(x))
+        x = self.relu(self.fc3(x))
+        x = self.softmax(self.fc4(x))
+        return x        
 
 class AudioDataSet:
     def __init__(self, datadir, slice_len, NUM_CATEG, timit_words):
@@ -200,7 +218,7 @@ def whisper_recognize_wavs(filenames, fast_whisper_model, vocab, timit_words):
     if len(indices_of_recognized_words) == 0:
         probabilities = None
     else:
-        probabilities = np.vstack(test_files.loc[test_files['index'].isin(indices_of_recognized_words)].prob)    
+        probabilities = np.vstack(test_files.prob)    
 
     return(indices_of_recognized_words, probabilities)
 
@@ -226,9 +244,6 @@ def Q2_whisper(G_z, fast_whisper_model, timit_words, vocab, epoch, batch_size, w
     else:
         indices_of_recognized_words, probs = whisper_recognize_wavs(files_for_asr, fast_whisper_model, vocab, timit_words)
         return(indices_of_recognized_words, probs, files_for_asr)
-
-def cross_entropy:
-    return(-np.sum(true_probs * np.log(predicted_probs)))
 
 def Q2(G_z, labels, batch_size, unigrams, asr_model, timit_words, epoch_i, decoder, num_cores):
     raise ValueError('Deprecated in favor of Q2_whisper')    
@@ -423,16 +438,20 @@ if __name__ == "__main__":
     NUM_EPOCHS = args.num_epochs
     WAVEGAN_DISC_NUPDATES = 5
     WAVEGAN_Q2_NUPDATES = 10
-    Q2_EPOCH_START = 2000
+    Q2_EPOCH_START = 1000
     WAV_OUTPUT_N = 25
     SAVE_INT = args.save_int
+
+    # RL Parameters
+    RL_DISCOUNT_FACTOR = .99
+    RL_LEARNING_RATE = .001
 
     #Sizes of things
     SLICE_LEN = args.slice_len
     NUM_CATEG = args.num_categ
     BATCH_SIZE = args.batch_size
 
-    # Learning rates
+    # GAN Learning rates
     LAMBDA = 10
     LEARNING_RATE = 1e-4
     BETA1 = 0.5
@@ -461,22 +480,27 @@ if __name__ == "__main__":
         drop_last=True
     )
 
-    def make_new():
+ def make_new():
         G = WaveGANGenerator(slice_len=SLICE_LEN, ).to(device).train()
         D = WaveGANDiscriminator(slice_len=SLICE_LEN).to(device).train()
+        E = FNN(input_dim=NUM_CATEG, output_dim=NUM_CATEG).to(device).train()
 
         # Optimizers
         optimizer_G = optim.Adam(G.parameters(), lr=LEARNING_RATE, betas=(BETA1, BETA2))
         optimizer_D = optim.Adam(D.parameters(), lr=LEARNING_RATE, betas=(BETA1, BETA2))
+        
 
-        Q, optimizer_Q, optimizer_Q2, criterion_Q  = (None, None, None, None)
+        Q, optimizer_Q, optimizer_Q2, criterion_Q, optimizer_E, criterion_E  = (None, None, None, None)
         if train_Q:
             Q = WaveGANQNetwork(slice_len=SLICE_LEN, num_categ=NUM_CATEG).to(device).train()
             optimizer_Q = optim.RMSprop(it.chain(G.parameters(), Q.parameters()),
                                         lr=LEARNING_RATE)
             # just update the G parameters
             if args.Q2:
-                optimizer_Q2 = optim.RMSprop(it.chain(G.parameters(), Q.parameters()) , lr=LEARNING_RATE)
+                optimizer_Q2 = optim.Adam(E.parameters(), lr=LEARNING_RATE, betas=(BETA1, BETA2)) 
+                #optim.RMSprop(Q.parameters(), lr=RL_LEARNING_RATE)
+                #optimizer_E = optim.Adam(E.parameters(), lr=LEARNING_RATE, betas=(BETA1, BETA2)) 
+                #criterion_E = lambda inpt, target: torch.nn.CrossEntropyLoss()(inpt, target)
 
             if args.fiw:
                 print("Training a fiwGAN with ", NUM_CATEG, " categories.")
@@ -487,18 +511,18 @@ if __name__ == "__main__":
                 # CE loss needs logit, category -> loss
                 criterion_Q = lambda inpt, target: torch.nn.CrossEntropyLoss()(inpt, target.max(dim=1)[1])
                 
-            # if args.Q2:
-            #     criterion_Q2 = lambda adult_interp, target: torch.nn.CrossEntropyLoss()(adult_interp, target.max(dim=1)[1]) 
+            if args.Q2:
+                criterion_Q2 = lambda adult_interp, target: torch.nn.CrossEntropyLoss()(adult_interp, target) 
             #     criterion_QQ = lambda child_expected_interp, adult_interp: torch.nn.CrossEntropyLoss()(child_expected_interp, adult_interp.max(dim=1)[1]) 
             # else: 
             #     criterion_Q2 = None
             #     criterion_QQ = None
             
 
-        return G, D, optimizer_G, optimizer_D, Q, optimizer_Q, optimizer_Q2, criterion_Q
+        return G, D, E, optimizer_G, optimizer_D, Q, optimizer_Q, optimizer_Q2, criterion_Q, criterion_Q2
 
     # Load models
-    G, D, optimizer_G, optimizer_D, Q, optimizer_Q, optimizer_Q2, criterion_Q = make_new()
+    G, D, E, optimizer_G, optimizer_D, Q, optimizer_Q, optimizer_Q2, criterion_Q, criterion_Q2  = make_new()
         
     
     start_epoch = 0
@@ -564,7 +588,8 @@ if __name__ == "__main__":
                     
                     # c = torch.nn.functional.one_hot(torch.randint(0, NUM_CATEG, (BATCH_SIZE,)),
                     #                                 num_classes=NUM_CATEG).to(device)
-                z = torch.cat((c, _z), dim=1)
+                #z = torch.cat((c, _z), dim=1)
+                z = c
                 #z = torch.cat((c, zeros, _z), dim=1)
             else:
                 raise NotImplementedError
@@ -588,7 +613,7 @@ if __name__ == "__main__":
                 if train_Q2:    
                     optimizer_Q2.zero_grad()                                        
 
-                _z = torch.FloatTensor(BATCH_SIZE, 100 - (NUM_CATEG + 1)).uniform_(-1, 1).to(device)
+                #_z = torch.FloatTensor(BATCH_SIZE, 100 - (NUM_CATEG + 1)).uniform_(-1, 1).to(device)
 
 
                 if train_Q:
@@ -600,7 +625,8 @@ if __name__ == "__main__":
                         #c = torch.nn.functional.one_hot(torch.randint(0, NUM_CATEG, (BATCH_SIZE,)),
                         # num_classes=NUM_CATEG).to(device)
 
-                    z = torch.cat((c, _z), dim=1)
+                    #z = torch.cat((c, _z), dim=1)
+                    z = c
                 else:
                     z = _z
 
@@ -615,52 +641,103 @@ if __name__ == "__main__":
                 if (epoch % WAV_OUTPUT_N == 0) & (i <= 1) & (epoch < Q2_EPOCH_START):
                      
                     print('Sampling .wave outputs (but not running them through Q2)...')
-                    wav_output = Q2_whisper(G_z, faster_whisper_model, timit_words, vocab, epoch, Q2_BATCH_SIZE, write_only=True)
+                    wav_output = Q2_whisper(G_z, faster_whisper_model, timit_words, vocab, epoch, BATCH_SIZE, write_only=True)
                     # but don't do anything with it; just let it write out all of the audio files
 
                 # Q2 Loss: Update G and Q to better imitate the Q2 model
-                if (i != 0) and train_Q2 and (i % WAVEGAN_Q2_NUPDATES == 0) & (epoch >= Q2_EPOCH_START):
+                if (i != 0) and train_Q2 and (i % WAVEGAN_Q2_NUPDATES == 0) & (epoch >= Q2_EPOCH_START):                    
                     if label_stages:
-                        print('Q2 -> (G, Q) update')                
+                        print('Starting RL phase')                        
+
+                    predicted_value_loss = torch.nn.CrossEntropyLoss()
+                    actual_loss = torch.nn.CrossEntropyLoss()
+                    rewards = []
+                    recoveries = []
+                    reward_prediction_errs = []
+                    RL_BATCH_SIZE = 12
+                    total_recognized_words = 0
+
+
+                    for i in range(NUM_CATEG):
+
+                        # generate a minibatch worth of generations
+                        selected_referents = np.zeros([RL_BATCH_SIZE, NUM_CATEG+1], dtype=np.float32)
+                        selected_referents[:,i] = 1
+                        selected_referents = torch.Tensor(selected_referents).to(device)
+                        #_z = torch.FloatTensor(RL_BATCH_SIZE, 100 - (NUM_CATEG + 1)).uniform_(-1, 1).to(device)
+
+                        #candidates = G(torch.cat((selected_referents, _z), dim=1))
+                        # E 
+                        candidates = G(E(selected_referents))                        
+
+                        # if we wanted to choose the top n of something in the action space, it would be here:
+                        #expected_recovery = torch.cat((Q(candidates), torch.Tensor(-10. * np.ones([BATCH_SIZE,1])).to(device)), dim=1)
+                        
+                        #predicted_values = torch.Tensor([predicted_value_loss(expected_recovery[i], selected_referents[i]) for i in range(expected_recovery.shape[0])])
+
+                        # send the candidates through Whisper
                         print('Recognizing words with Whisper model...')  
-                         
-                    indices_of_recognized_words, Q2_probs, filenames = Q2_whisper(G_z, faster_whisper_model, timit_words, vocab, epoch, Q2_BATCH_SIZE)
-                                        
-
-                    writer.add_scalar('Metric/Words Recognized', len(indices_of_recognized_words), step)                                                            
-                    
-                    if label_stages:
-                        print('Word recognition complete. Found '+str(len(indices_of_recognized_words))+' of '+str(Q2_BATCH_SIZE)+' words')
-
-                    if len(indices_of_recognized_words) > 1:
-
+                        indices_of_recognized_words, Q2_probs, filenames = Q2_whisper(candidates, faster_whisper_model, timit_words, vocab, epoch, RL_BATCH_SIZE)
+                        total_recognized_words += len(indices_of_recognized_words)
+                        
                         if label_stages:
-                            print('Starting RL phase')
-                            print('Q2 -> G network update!')
-                    
-                        assert(Q2_probs.shape[1] == NUM_CATEG+1)                        
-                        Q2_output = torch.from_numpy(Q2_probs).to(device).requires_grad_()
-
-                        Q_G_z = Q(G_z)
-
-
-                        for index_of_recognized_word in tqdm(indices_of_recognized_words):
-                            # compute value given current value function of agent
-                            val = 0 # this is a one shot game for each reference. Might change later
-                            # recall that actions were G_z; the value function applied to G_z is Q(G_z)
+                            print('Word recognition complete. Found '+str(len(indices_of_recognized_words))+' of '+str(RL_BATCH_SIZE)+' words')
+                        
+                        if len(indices_of_recognized_words) > 0:
                             
-                            # compute the expected value with the G and Q networks: how well does the agent think that Q_g_z transmits labels? Cross entropy of Q(G(z)) and the label; be careful about the negative.
-                            next_val = -cross_entropy(labels[index_of_recognized_word], Q_G_z[index_of_recognized_word])
-                            # compute the actual cross entropy for corresponding index_of_recognized_word
-                            reward = -cross_entropy(labels[index_of_recognized_word], Q2_output[index_of_recognized_word]) 
-                            writer.add_scalar('Metric/Reward',reward, step)
+                            assert(Q2_probs.shape[1] == NUM_CATEG+1)
+                            Q2_output = torch.from_numpy(Q2_probs.astype(np.float32)).to(device) # for padding the UNKs, in logit space
 
-                            end_to_end_RL_err = reward + (discount_factor * next_val) - val 
-                            end_to_end_RL_loss = torch.square(torch.tensor(end_to_end_RL_err, dtype=torch.float32, device = device))
-                            writer.add_scalar('Loss/End-to-End Loss', Q2_loss, step)
+                                                    
+                            zero_tensor = torch.Tensor([float(0)]).to(device)
 
-                            end_to_end_RL_loss.backward()
-                            optimizer_Q2.step()
+                            for index_of_recognized_word in tqdm(indices_of_recognized_words):
+                                # update Q    
+                                print('RL trial with word '+str(index_of_recognized_word))
+                                optimizer_Q2.zero_grad() # clear the gradients for the RL trial
+                            
+                                # compute the expected value of each utterance
+                                # this is a one shot game for each reference, so implicitly the value before taking the action is 0. I might update this later, i.e., think about this in terms of sequences
+                                # recall that actions were G_z / candidates ; the value function is Q(G_z)    
+
+                                Q_prediction = torch.softmax(Q(candidates[index_of_recognized_word,]), dim=1)[0]
+                                augmented_Q_prediction = torch.cat((Q_prediction, zero_tensor))
+                                                
+                                predicted_val = predicted_value_loss(augmented_Q_prediction, selected_referents[index_of_recognized_word])
+                                                            
+                                # compute the actual cross entropy for corresponding index_of_recognized_word. Reward depends on if the adult is able to pull out the indended message, indexed by label. Detaching so that it doesn't try to backprop through reward
+                                reward = actual_loss(selected_referents[index_of_recognized_word], Q2_output[index_of_recognized_word]).detach()
+                                print('Reward: '+str(reward))
+                                rewards.append(reward.cpu().numpy())
+
+                            
+                                # count the number of words correctly recovered
+                                recovered = torch.eq(torch.argmax(labels[index_of_recognized_word]), torch.argmax(Q2_output[index_of_recognized_word])).cpu().numpy().tolist()
+                                recoveries.append(recovered)
+
+
+                                Q2_loss = torch.square(reward - predicted_val) #want to minimize this                    
+                                reward_prediction_errs.append(Q2_loss.detach().cpu().numpy())
+                                                                                                             
+                                Q2_loss.backward(retain_graph=True)                            
+            
+                            
+                                # print('Gradients on the Q network:')
+                                # print('Q layer 0: '+str(np.round(torch.sum(torch.abs(Q.downconv_0.conv.weight.grad)).cpu().numpy(), 4)))
+                                # print('Q layer 1: '+str(np.round(torch.sum(torch.abs(Q.downconv_1.conv.weight.grad)).cpu().numpy(), 4)))
+                                # print('Q layer 2: '+str(np.round(torch.sum(torch.abs(Q.downconv_2.conv.weight.grad)).cpu().numpy(), 4)))
+                                # print('Q layer 3: '+str(np.round(torch.sum(torch.abs(Q.downconv_3.conv.weight.grad)).cpu().numpy(), 4)))
+                                # print('Q layer 4: '+str(np.round(torch.sum(torch.abs(Q.downconv_4.conv.weight.grad)).cpu().numpy(), 4)))
+
+                                print('Q2 step!')                                
+                                optimizer_Q2.step()                            
+                            
+
+                    writer.add_scalar('Metric/Average Reward',np.mean(rewards), step)
+                    writer.add_scalar('Metric/Proportion Recovered Words Among Recognized', np.sum(recoveries) / total_recognized_words, step)
+                    writer.add_scalar('Metric/Proportion Recovered Words Among Total', np.sum(recoveries) / (RL_BATCH_SIZE *NUM_CATEG), step)
+                    writer.add_scalar('Loss/Q2: Temporal Differencing Loss', np.mean(reward_prediction_errs), step)
+
 
 
                 elif train_Q:         

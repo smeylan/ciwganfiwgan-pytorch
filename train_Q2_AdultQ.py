@@ -212,6 +212,31 @@ def whisper_recognize_wavs(filenames, fast_whisper_model, vocab, timit_words, Q2
 
     return(indices_of_recognized_words, probabilities, whisper_recognition_info)
 
+def Q2_cnn(selected_candidate_wavs, Q2):
+    Q2_probs = Q2(selected_candidate_wavs)
+    zeros = torch.zeros([Q2_probs.shape[0],1], device = device)
+    zeros += .0001
+    Q_network_probs_with_unk = torch.hstack((Q2_probs, zeros))
+    indices_of_recognized_words = range(Q_network_probs_with_unk.shape[0])
+    return(indices_of_recognized_words, Q_network_probs_with_unk)
+
+def write_out_wavs(G_z_2d, labels, timit_words, epoch):
+    # returns probabilities and a set of indices; takes a smaller number of arguments
+    files_for_asr = []
+    epoch_path = os.path.join("temp",str(epoch))
+    if not os.path.exists(epoch_path):
+        os.makedirs(epoch_path)    
+
+    labels_local = labels.cpu().detach().numpy()
+    # for each file in the batch, write out a wavfile
+    for j in range(G_z_2d.shape[0]):
+        audio_buffer = G_z_2d[j,:].detach().cpu().numpy()          
+        true_word = timit_words[np.argwhere(labels_local[j,:])[0][0]]
+        tf = os.path.join(epoch_path,true_word + '_' + str(uuid.uuid4())+".wav")
+        write(tf, 16000, audio_buffer)
+        files_for_asr.append(copy.copy(tf))
+    return(files_for_asr)
+
 
 def Q2_whisper(G_z_2d, labels, fast_whisper_model, timit_words, vocab, epoch, Q2_GLOBALS, write_only=False):
     # returns probabilities and a set of indices; takes a smaller number of arguments
@@ -235,7 +260,7 @@ def Q2_whisper(G_z_2d, labels, fast_whisper_model, timit_words, vocab, epoch, Q2
         indices_of_recognized_words, probs, whisper_recognition_info = whisper_recognize_wavs(files_for_asr, fast_whisper_model, vocab, timit_words, Q2_GLOBALS)
         return(indices_of_recognized_words, probs, files_for_asr, whisper_recognition_info)
 
-def Q2(G_z, labels, batch_size, unigrams, asr_model, timit_words, epoch_i, decoder, num_cores):
+def Q2_nemo(G_z, labels, batch_size, unigrams, asr_model, timit_words, epoch_i, decoder, num_cores):
     raise ValueError('Deprecated in favor of Q2_whisper')    
     
     # make a directory to save all outputs for the epoch
@@ -397,7 +422,7 @@ if __name__ == "__main__":
         vocab = vocab.loc[vocab['count'] > 20]
         vocab['probability'] = vocab['count'] / np.sum(vocab['count'])
         vocab.word = vocab.word.astype('str')
-        faster_whisper_model = faster_whisper.WhisperModel('medium.en', device="cuda", compute_type="float16")
+        #faster_whisper_model = faster_whisper.WhisperModel('medium.en', device="cuda", compute_type="float16")
 
 
 
@@ -428,11 +453,12 @@ if __name__ == "__main__":
     NUM_EPOCHS = args.num_epochs
     WAVEGAN_DISC_NUPDATES = 5
     WAVEGAN_Q2_NUPDATES = 10
-    Q2_EPOCH_START = 1000
-    WAV_OUTPUT_N = 25
+    Q2_EPOCH_START = 0
+    WAV_OUTPUT_N = 5
     SAVE_INT = args.save_int
-    PRODUCTION_START_EPOCH = 25
+    PRODUCTION_START_EPOCH = 0
     COMPREHENSION_INTERVAL = 100000
+
 
     #Sizes of things
     SLICE_LEN = args.slice_len
@@ -449,13 +475,14 @@ if __name__ == "__main__":
     label_stages = True
 
     # Q2 parameters. Only if satisfied will the Q2 network be used. Corresponds to adult decision rule about when to take an action
-    Q2_BATCH_SIZE = 4
-    Q2_GLOBALS = {
-        "MIN_DECODING_PROB" : .1,
-        "MAX_NOSPEECH_PROB" : .1,
-        "MAX_UNK_PROB" : .25,
-        "Q2_TIMEOUT" : .4
-    }
+    NUM_Q2_TRAINING_EPOCHS = 25
+    Q2_BATCH_SIZE = 6
+    # Q2_GLOBALS = {
+    #     "MIN_DECODING_PROB" : .1,
+    #     "MAX_NOSPEECH_PROB" : .1,
+    #     "MAX_UNK_PROB" : .25,
+    #     "Q2_TIMEOUT" : .4
+    # }
 
     
 
@@ -484,10 +511,12 @@ if __name__ == "__main__":
         if train_Q:
             Q = WaveGANQNetwork(slice_len=SLICE_LEN, num_categ=NUM_CATEG).to(device).train()
             optimizer_Q_to_G = optim.RMSprop(G.parameters(), lr=LEARNING_RATE)
-            optimizer_Q_to_Q = optim.RMSprop(Q.parameters(), lr=LEARNING_RATE)
+            optimizer_Q_to_Q = optim.RMSprop(Q.parameters(), lr=LEARNING_RATE)            
             # just update the G parameters
             if args.Q2:
+                Q2 = WaveGANQNetwork(slice_len=SLICE_LEN, num_categ=NUM_CATEG).to(device).train()
                 optimizer_Q2_to_Q = optim.RMSprop(Q.parameters(), lr=LEARNING_RATE)
+                optimizer_Q2_to_Q2 = optim.RMSprop(Q2.parameters(), lr=LEARNING_RATE)
 
             if args.fiw:
                 print("Training a fiwGAN with ", NUM_CATEG, " categories.")
@@ -506,10 +535,10 @@ if __name__ == "__main__":
             #     criterion_QQ = None
             
 
-        return G, D, optimizer_G, optimizer_D, Q, optimizer_Q_to_G, optimizer_Q_to_Q, optimizer_Q2_to_Q, criterion_Q
+        return G, D, optimizer_G, optimizer_D, Q, Q2, optimizer_Q_to_G, optimizer_Q_to_Q, optimizer_Q2_to_Q, optimizer_Q2_to_Q2, criterion_Q
 
     # Load models
-    G, D, optimizer_G, optimizer_D, Q, optimizer_Q_to_G, optimizer_Q_to_Q, optimizer_Q2_to_Q, criterion_Q = make_new()
+    G, D, optimizer_G, optimizer_D, Q, Q2, optimizer_Q_to_G, optimizer_Q_to_Q, optimizer_Q2_to_Q, optimizer_Q2_to_Q2, criterion_Q = make_new()
         
     
     start_epoch = 0
@@ -535,6 +564,9 @@ if __name__ == "__main__":
                 optimizer_Q_to_Q.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Q_to_Qopt.pt")))
                 optimizer_Q2_to_Q.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Q2_to_Qopt.pt")))
 
+            if train_Q2:
+                Q2.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Q2.pt")))
+
             start_step = int(re.search(r'_step(\d+).*', fname).group(1))
             print(f"Successfully loaded model. Continuing training from epoch {start_epoch},"
                   f" step {start_step}")
@@ -547,6 +579,34 @@ if __name__ == "__main__":
     # Set Up Writer
     writer = SummaryWriter(logdir)
     step = start_step
+
+
+    regenerate = False
+    if regenerate:
+        print('Training an Adult Q2 CNN Network')
+        step = start_step
+        for epoch in range(start_epoch + 1, NUM_Q2_TRAINING_EPOCHS):
+            print("Epoch {} of {}".format(epoch, NUM_Q2_TRAINING_EPOCHS))
+            print("-----------------------------------------")
+
+            pbar = tqdm(dataloader)            
+            for i, trial in enumerate(pbar):            
+                reals = trial[0].to(device)
+                labels = trial[1].to(device)        
+                optimizer_Q2_to_Q2.zero_grad()
+                incdices_of_recognized_words, adult_recovers_from_adult = Q2_cnn(reals, Q2)    
+                Q2_comprehension_loss = criterion_Q(adult_recovers_from_adult, labels[:,0:NUM_CATEG]) # Note we exclude the UNK label --  child never intends to produce unk
+                Q2_comprehension_loss.backward()
+                optimizer_Q2_to_Q2.step()
+                step += 1
+        torch.save(Q2, 'saved_networks/adult_pretrained_Q_network.torch')
+    else:
+        print('Loading a Previous Adult Q2 CNN Network')
+        Q2 = torch.load('saved_networks/adult_pretrained_Q_network.torch')
+        Q2.eval()
+    # freeze it
+    for p in Q2.parameters():
+        p.requires_grad = False
 
     for epoch in range(start_epoch + 1, NUM_EPOCHS):
 
@@ -576,9 +636,6 @@ if __name__ == "__main__":
                             
 
             else:
-                print('Check size of pretrained Q network')
-                import pdb
-                pdb.set_trace()
                 # Discriminator Update                
 
                 epsilon = torch.rand(BATCH_SIZE, 1, 1).repeat(1, 1, SLICE_LEN).to(device)
@@ -648,7 +705,7 @@ if __name__ == "__main__":
                     if (epoch % WAV_OUTPUT_N == 0) & (i <= 1) & (epoch < Q2_EPOCH_START):
                          
                         print('Sampling .wave outputs (but not running them through Q2)...')
-                        wav_output = Q2_whisper(G_z, c, faster_whisper_model, timit_words, vocab, epoch, Q2_GLOBALS, write_only=True)
+                        write_out_wavs(G_z, labels, timit_words, epoch)                        
                         # but don't do anything with it; just let it write out all of the audio files
 
                     # Q2 Loss: Update G and Q to better imitate the Q2 model
@@ -709,8 +766,8 @@ if __name__ == "__main__":
                         selected_Q_estimates = torch.vstack(selected_Q_estimates)  
 
 
-                        print('Recognizing words with Whisper model...')  
-                        indices_of_recognized_words, Q2_probs, filenames, whisper_recognition_info = Q2_whisper(selected_candidate_wavs, selected_referents, faster_whisper_model, timit_words, vocab, epoch)
+                        print('Recognizing G output with Q2 model...')  
+                        indices_of_recognized_words, Q2_probs = Q2_cnn(selected_candidate_wavs.unsqueeze(1), Q2) 
                         total_recognized_words = len(indices_of_recognized_words)
                         print('Word recognition complete. Found '+str(len(indices_of_recognized_words))+' of '+str(Q2_BATCH_SIZE*NUM_CATEG)+' words')
 
@@ -720,7 +777,8 @@ if __name__ == "__main__":
                             assert(Q2_probs.shape[1] == NUM_CATEG+1)
                             
                             print('Comparing Q predictions to Q2 output')        
-                            Q2_output = torch.from_numpy(Q2_probs.astype(np.float32)).to(device) 
+                            #Q2_output = torch.from_numpy(Q2_probs.astype(np.float32)).to(device) 
+                            Q2_output = Q2_probs
 
                             # Q_of_selected_candidates is the expected value of each utterance
 

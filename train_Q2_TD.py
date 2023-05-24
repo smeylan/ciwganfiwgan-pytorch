@@ -431,7 +431,7 @@ if __name__ == "__main__":
     Q2_EPOCH_START = 1000
     WAV_OUTPUT_N = 25
     SAVE_INT = args.save_int
-    PRODUCTION_START_EPOCH = 25
+    PRODUCTION_START_EPOCH = 0
     COMPREHENSION_INTERVAL = 100000
 
     #Sizes of things
@@ -576,10 +576,6 @@ if __name__ == "__main__":
                             
 
             else:
-                print('Check size of pretrained Q network')
-                import pdb
-                pdb.set_trace()
-                # Discriminator Update                
 
                 epsilon = torch.rand(BATCH_SIZE, 1, 1).repeat(1, 1, SLICE_LEN).to(device)
                 _z = torch.FloatTensor(BATCH_SIZE, 100 - (NUM_CATEG + 1)).uniform_(-1, 1).to(device)
@@ -632,6 +628,8 @@ if __name__ == "__main__":
                         z = _z
 
                     G_z = G(z)
+                    import pdb
+                    pdb.set_trace()
 
                     # G Loss
                     G_loss = torch.mean(-D(G_z))

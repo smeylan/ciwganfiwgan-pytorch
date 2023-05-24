@@ -558,7 +558,7 @@ if __name__ == "__main__":
             if (epoch <= PRODUCTION_START_EPOCH) or (epoch % COMPREHENSION_INTERVAL == 0):
                 # Just train the Q network from external data
                 if label_stages:
-                    print('Updating Q network to identify referents')
+                    print('Updating Child Q network to identify referents')
 
                 optimizer_Q_to_Q.zero_grad()
                 child_recovers_from_adult = Q(reals)    

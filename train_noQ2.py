@@ -415,24 +415,12 @@ if __name__ == "__main__":
                 optimizer_D.zero_grad()                 
 
                 epsilon = torch.rand(BATCH_SIZE, 1, 1).repeat(1, 1, SLICE_LEN).to(device)
-                _z = torch.FloatTensor(BATCH_SIZE, 100 - (NUM_CATEG + 1)).uniform_(-1, 1).to(device)
-
-                if train_Q:
-                    #zeros = torch.zeros(BATCH_SIZE, 1).to(device)
-                    if args.fiw:
-                        raise NotImplementedError
-                        c = torch.FloatTensor(BATCH_SIZE, NUM_CATEG).bernoulli_().to(device)
-                    
-                    else:                    
-                        c = torch.nn.functional.one_hot(torch.randint(0, NUM_CATEG, (BATCH_SIZE,)),
+                
+                c = torch.nn.functional.one_hot(torch.randint(0, NUM_CATEG, (BATCH_SIZE,)),
                                                          num_classes=NUM_CATEG).to(device)
-                    
-                    z = torch.cat((labels, _z), dim=1)
-                    #z = torch.cat((c, zeros, _z), dim=1)
-                else:
-                    raise NotImplementedError
-                    z = _z
-
+                zeros = torch.zeros([BATCH_SIZE,1], device = device)
+                _z = torch.FloatTensor(BATCH_SIZE, 100 - (NUM_CATEG + 1)).uniform_(-1, 1).to(device)
+                z = torch.cat((c, zeros, _z), dim=1)
                 fakes = G(z)
 
                 # shuffle the reals so that the matched item for discrim is not necessarily from the same referent                
@@ -450,27 +438,21 @@ if __name__ == "__main__":
                 if i % WAVEGAN_DISC_NUPDATES == 0:
                     optimizer_G.zero_grad()
                                                                 
+                    
+                    if label_stages:
+                        print('D -> G  update')
+
+
+                    c = torch.nn.functional.one_hot(torch.randint(0, NUM_CATEG, (BATCH_SIZE,)),
+                             num_classes=NUM_CATEG).to(device)
                     _z = torch.FloatTensor(BATCH_SIZE, 100 - (NUM_CATEG + 1)).uniform_(-1, 1).to(device)
+                    zeros = torch.zeros([BATCH_SIZE,1], device = device)
+                    z = torch.cat((c, zeros, _z), dim=1)
 
-
-                    if train_Q:
-                        #optimizer_Q_to_QG.zero_grad()
-                        if args.fiw:
-                            raise NotImplementedError
-                            c = torch.FloatTensor(BATCH_SIZE, NUM_CATEG).bernoulli_().to(device)                        
-                        else:
-                            c = labels 
-                            #c = torch.nn.functional.one_hot(torch.randint(0, NUM_CATEG, (BATCH_SIZE,)),
-                            # num_classes=NUM_CATEG).to(device)
-
-                        z = torch.cat((c, _z), dim=1)
-                    else:
-                        z = _z
-
-                    G_z = G(z) # generate again using the same labels
+                    G_z_for_G_update = G(z) # generate again using the same labels
 
                     # G Loss
-                    G_loss = torch.mean(-D(G_z))
+                    G_loss = torch.mean(-D(G_z_for_G_update))
                     G_loss.backward(retain_graph=True)
                     # Update
                     optimizer_G.step()
@@ -483,17 +465,26 @@ if __name__ == "__main__":
                     if (epoch % WAV_OUTPUT_N == 0) & (i <= 1):
                          
                         print('Sampling .wav outputs (but not running them through Q2)...')
-                        write_out_wavs(G_z, labels, timit_words, epoch)                        
+                        write_out_wavs(G_z_for_G_update, c, timit_words, epoch)                        
                         # but don't do anything with it; just let it write out all of the audio files
 
                     # Q2 Loss: Update G and Q to better imitate the Q2 model
                     
                         
                     if label_stages:
-                        print('Q -> G update')
+                        print('Q -> G, Q update')
+
+                    c = torch.nn.functional.one_hot(torch.randint(0, NUM_CATEG, (BATCH_SIZE,)),
+                             num_classes=NUM_CATEG).to(device)
+                    _z = torch.FloatTensor(BATCH_SIZE, 100 - (NUM_CATEG + 1)).uniform_(-1, 1).to(device)
+                    zeros = torch.zeros([BATCH_SIZE,1], device = device)
+                    z = torch.cat((c, zeros, _z), dim=1)
+
+                    G_z_for_Q_update = G(z) # generate again using the same labels
+
                     
                     optimizer_Q_to_QG.zero_grad()                        
-                    Q_production_loss = criterion_Q(Q(G(z)), c[:,0:NUM_CATEG]) # Note we exclude the UNK label --  child never intends to produce unk
+                    Q_production_loss = criterion_Q(Q(G_z_for_Q_update), c[:,0:NUM_CATEG]) # Note we exclude the UNK label --  child never intends to produce unk
                     Q_production_loss.backward()
                     writer.add_scalar('Loss/Q to G', Q_production_loss.detach().item(), step)
                     optimizer_Q_to_QG.step()

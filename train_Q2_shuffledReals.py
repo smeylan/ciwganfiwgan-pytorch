@@ -687,14 +687,11 @@ if __name__ == "__main__":
 
                 fakes = G(z)
 
-                print('Figure out how to shuffle the reals')
-                import pdb
-                pdb.set_trace()                
-                #shuffled_reals = reals[:,torch.randperm(t.shape[1]),:]
-
-                penalty = gradient_penalty(G, D, reals, fakes, epsilon)
-
-                D_loss = torch.mean(D(fakes) - D(reals) + LAMBDA * penalty)
+                # shuffle the reals so that the matched item for discrim is not from the same class
+                shuffled_reals = reals[torch.randperm(reals.shape[0]),:,:]
+                
+                penalty = gradient_penalty(G, D, shuffled_reals, fakes, epsilon)
+                D_loss = torch.mean(D(fakes) - D(shuffled_reals) + LAMBDA * penalty)
                 writer.add_scalar('Loss/D', D_loss.detach().item(), step)
                 D_loss.backward()
                 if label_stages:
@@ -883,10 +880,7 @@ if __name__ == "__main__":
                         if label_stages:
                             print('Q -> G update')
                         
-                        optimizer_Q_to_QG.zero_grad()
-                        print('Inspect Q-> G update')
-                        import pdb
-                        pdb.set_trace()
+                        optimizer_Q_to_QG.zero_grad()                        
                         Q_production_loss = criterion_Q(Q(G(z)), c[:,0:NUM_CATEG]) # Note we exclude the UNK label --  child never intends to produce unk
                         Q_production_loss.backward()
                         writer.add_scalar('Loss/Q to G', Q_production_loss.detach().item(), step)

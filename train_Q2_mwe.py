@@ -34,13 +34,6 @@ from varname import nameof
 
 torch.autograd.set_detect_anomaly(True)
 
-# For Nemo Q2
-# import multiprocessing
-# import nemo.collections.asr as nemo_asr
-# import pyctcdecode
-# import kenlm
-
-
 class AudioDataSet:
     def __init__(self, datadir, slice_len, NUM_CATEG, timit_words):
         print("Loading data")
@@ -97,120 +90,6 @@ def gradient_penalty(G, D, reals, fakes, epsilon):
     penalty = ((grad_norm - 1) ** 2).unsqueeze(1)
     return penalty
 
-class TimeoutException(Exception): pass
-
-@contextmanager
-def time_limit(seconds):
-    def signal_handler(signum, frame):
-        raise TimeoutException("Timed out!")
-    signal.signal(signal.SIGALRM, signal_handler)
-    #signal.alarm(seconds)
-    signal.setitimer(signal.ITIMER_REAL,seconds) 
-    try:
-        yield
-    finally:
-        signal.alarm(0)
-
-def fast_whisper_recognize_wav(filename, whisper_model, timit_words, vocab, Q2_TIMEOUT):    
-    
-    ip = 'A person on the radio just said one of the following words: "'+'", "'.join(timit_words)+'." The word was "'
-    
-    try:
-        with time_limit(Q2_TIMEOUT):
-            segments, info = whisper_model.transcribe(filename, language="en", initial_prompt = ip)
-            transcription = [x for x in segments][0]    
-            timeout = False
-
-    except TimeoutException as e:
-        timeout = True
-    
-    if not timeout:
-        best_guess_of_string = transcription.text.lower().strip().replace(' ','')
-        best_guess_of_string = best_guess_of_string.translate(str.maketrans('', '', string.punctuation))
-    
-        #likelihoods: compute levenshtein distance to all n
-    
-        distances = np.array([lev(x,best_guess_of_string) for x in vocab.word])
-    
-        alpha = 2.
-        likelihoods = np.exp(-1. * alpha * distances)
-        
-        # priors: 
-        # priors = np.ones(len(timit_words)) * 1./len(timit_words)
-        priors = vocab.probability
-    
-        unnormalized = priors * likelihoods
-        posteriors = unnormalized / np.sum(unnormalized)
-            
-        candidates = pd.DataFrame({"hypothesis":vocab.word,"prob":posteriors}).sort_values(by=['prob'], ascending=False)
-        candidates.to_csv(filename.replace('.wav','_candidates.csv'))
-        
-        limited_probs = candidates.loc[candidates.hypothesis.isin(timit_words)]
-        remainder_prob =  np.sum(candidates.loc[~candidates.hypothesis.isin(timit_words)].prob)
-        remainder_row = pd.DataFrame({'hypothesis':["UNK"], "logit_score":[np.nan], 
-                                  "combined_score":[np.nan], "prob":[remainder_prob]})
-
-        simplified = pd.concat([limited_probs, remainder_row])
-        simplified.to_csv(filename.replace('.wav','_simplified.csv'))
-    
-        # make sure all timit words are present
-        simplified = pd.DataFrame({'hypothesis':timit_words}).merge(simplified[['hypothesis', 'prob']], how="left") 
-        simplified = simplified.fillna(0)         
-
-        rdf = pd.DataFrame.from_records([{
-            'candidates': candidates.iloc[0:10],
-            'simplified': simplified,
-            'prob': simplified.prob.values,        
-            'decoding_prob':np.exp(transcription.avg_logprob),
-            'no_speech_prob': transcription.no_speech_prob,
-            'best_guess_of_string': best_guess_of_string,
-            'filename':filename,
-            'unk_prob': simplified.prob.values[-1],
-            "timeout": timeout
-            
-        }], index=[0])
-        
-    else:
-        dummy_prob = np.zeros(len(timit_words))
-        dummy_prob[-1] = 1 
-        rdf = pd.DataFrame.from_records([{
-            'candidates': None,
-            'simplified': None,
-            'prob': dummy_prob,        
-            'decoding_prob':None,
-            'no_speech_prob': None,
-            'best_guess_of_string': None,
-            'filename':filename,
-            'unk_prob': None,
-            "timeout": timeout
-            
-        }], index=[0])
-        
-        
-    return(rdf)
-
-def whisper_recognize_wavs(filenames, fast_whisper_model, vocab, timit_words, Q2_GLOBALS):        
-    
-    test_files = pd.DataFrame({"filename":filenames}) 
-    
-    sents = []    
-    for filename in tqdm(test_files.filename):
-        sents.append(fast_whisper_recognize_wav(filename, fast_whisper_model, timit_words, vocab, Q2_GLOBALS['Q2_TIMEOUT']))
-
-    results= pd.concat(sents)
-    test_files = test_files.merge(results)    
-    test_files['index'] = range(test_files.shape[0])
-
-    indices_of_recognized_words = test_files.loc[(test_files.decoding_prob > Q2_GLOBALS['MIN_DECODING_PROB']) & (test_files.no_speech_prob < Q2_GLOBALS['MAX_NOSPEECH_PROB']) & (test_files.unk_prob < Q2_GLOBALS['MAX_UNK_PROB']) &  ~test_files.timeout]['index'].values
-
-    if len(indices_of_recognized_words) == 0:
-        probabilities = None
-    else:
-        probabilities = np.vstack(test_files.prob)    
-
-    whisper_recognition_info = results
-
-    return(indices_of_recognized_words, probabilities, whisper_recognition_info)
 
 def Q2_cnn(selected_candidate_wavs, Q2):
     print('in Q2_cnn')
@@ -237,103 +116,6 @@ def write_out_wavs(G_z_2d, labels, timit_words, epoch):
         write(tf, 16000, audio_buffer[0])
         files_for_asr.append(copy.copy(tf))
     return(files_for_asr)
-
-
-def Q2_whisper(G_z_2d, labels, fast_whisper_model, timit_words, vocab, epoch, Q2_GLOBALS, write_only=False):
-    # returns probabilities and a set of indices; takes a smaller number of arguments
-    files_for_asr = []
-    epoch_path = os.path.join("temp",str(epoch))
-    if not os.path.exists(epoch_path):
-        os.makedirs(epoch_path)    
-
-    labels_local = labels.cpu().detach().numpy()
-    # for each file in the batch, write out a wavfile
-    for j in range(G_z_2d.shape[0]):
-        audio_buffer = G_z_2d[j,:].detach().cpu().numpy()          
-        true_word = timit_words[np.argwhere(labels_local[j,:])[0][0]]
-        tf = os.path.join(epoch_path,true_word + '_' + str(uuid.uuid4())+".wav")
-        write(tf, 16000, audio_buffer)
-        files_for_asr.append(copy.copy(tf))
-
-    if write_only:
-        return(None)
-    else:        
-        indices_of_recognized_words, probs, whisper_recognition_info = whisper_recognize_wavs(files_for_asr, fast_whisper_model, vocab, timit_words, Q2_GLOBALS)
-        return(indices_of_recognized_words, probs, files_for_asr, whisper_recognition_info)
-
-def Q2_nemo(G_z, labels, batch_size, unigrams, asr_model, timit_words, epoch_i, decoder, num_cores):
-    raise ValueError('Deprecated in favor of Q2_whisper')    
-    
-    # make a directory to save all outputs for the epoch
-    files_for_asr = []
-    epoch_path = os.path.join("temp",str(epoch_i))
-    if not os.path.exists(epoch_path):
-        os.makedirs(epoch_path)
-
-    labels_local = labels.cpu().detach().numpy()
-    # for each file in the batch, write out a wavfile
-    for j in range(batch_size):
-        audio_buffer = G_z[j, 0, :].detach().cpu().numpy()          
-        true_word = timit_words[np.argwhere(labels_local[j,:])[0][0]]
-        tf = os.path.join(epoch_path,true_word + '_' + str(uuid.uuid4())+".wav")
-        write(tf, 16000, audio_buffer)
-        files_for_asr.append(copy.copy(tf))
-    
-    #send the audio buffer through NeMO recognizer
-    # Q2 output needs to be over the 11 + 1 UNK categories
-    candidates, probabilities = batch_transcribe_with_pyctcdecoder(files_for_asr, lm_path, unigrams, asr_model, decoder, num_cores, timit_words)    
-
-    return(probabilities)
-
-def get_limited_prob(candidates, timit_words): 
-    raise ValueError('No longer necessary because of Q2_whisper')               
-    exp_d =np.exp(-1.*candidates.combined_score )    
-    candidates['prob'] = exp_d / np.sum(exp_d)
-    limited_probs = candidates.loc[candidates.hypothesis.isin(timit_words)]
-    remainder_prob =  np.sum(candidates.loc[~candidates.hypothesis.isin(timit_words)].prob)
-    remainder_row = pd.DataFrame({'hypothesis':["UNK"], "logit_score":[np.nan], "combined_score":[np.nan], "prob":[remainder_prob]})    
-    return(pd.concat([limited_probs, remainder_row]))
-
-def process_one_beam(beam_results_tuple, filename, timit_words):
-    raise ValueError('No longer necessary because of Q2_whisper')               
-    candidates = pd.DataFrame({'hypothesis':[x[0] for x in beam_results_tuple], 'logit_score': -1. * np.array([x[-2] for x in beam_results_tuple]), 'combined_score': -1. * np.array([x[-1] for x in beam_results_tuple])}) 
-
-    candidates.to_csv(filename.replace('.wav','_candidates.csv')) 
-
-    if candidates.shape[0] > len(np.unique(candidates.hypothesis)):
-        raise ValueError('Redundant hypotheses!')    
-
-    words_from_lang = get_limited_prob(candidates, timit_words)    
-    rdf = pd.DataFrame({'hypothesis':timit_words}).merge(words_from_lang[['hypothesis', 'prob']], how="left") 
-    rdf = rdf.fillna(0) 
-
-    rdf.to_csv(filename.replace('.wav','.csv'))
-
-    return((candidates, np.array(rdf.prob.to_list())))    
-
-
-def batch_transcribe_with_pyctcdecoder(files, lm_path, unigram_list, asr_model, decoder, num_cores, timit_words):
-    raise ValueError('No longer necessary because of Q2_whisper')               
-    
-    logits_for_batch= asr_model.transcribe(files, logprobs=True) # length equal to batch_size
-    
-    print('Decoding...')
-    with multiprocessing.Pool(processes=num_cores) as pool:
-        batch_beam_results_tuple = decoder.decode_beams_batch(
-            logits_list=logits_for_batch,
-            pool=pool,
-            beam_prune_logp=-500.,
-            token_min_logp=-20.,
-            beam_width=32
-        )
-    print('Done decoding!')
-
-    guesses = [process_one_beam(x[0],x[1], timit_words) for x in  zip(batch_beam_results_tuple, files)]
-
-    candidates = [x[0] for x in guesses]
-    probs = [x[1] for x in guesses]
-
-    return(candidates, np.vstack(probs))    
     
 
 def mark_unks_in_Q2(Q_network_probs, threshold, device):
@@ -439,32 +221,6 @@ if __name__ == "__main__":
         raise ValueError('Untested -- what happens with the feature representations')
     if args.Q2:
         timit_words = "she had your suit in dark greasy wash water all year".split(' ')+['UNK']
-        
-        # For the Whisper recognizer
-        vocab = pd.read_csv('data/vocab.csv')
-        vocab = vocab.loc[vocab['count'] > 20]
-        vocab['probability'] = vocab['count'] / np.sum(vocab['count'])
-        vocab.word = vocab.word.astype('str')
-        #faster_whisper_model = faster_whisper.WhisperModel('medium.en', device="cuda", compute_type="float16")
-
-
-
-        # For the NeMO recognizer
-        # asr_model = nemo_asr.models.EncDecCTCModelBPE.from_pretrained("nvidia/stt_en_conformer_ctc_large")
-        # lm_path = 'LM/timit.LM'
-        # unigrams = "she had your suit in dark greasy wash water all year".split(' ')
-        # unigrams = [str(x) for x in unigrams]
-        # if not os.path.exists('temp'):
-        #     os.makedirs('temp')
-        # decoder = pyctcdecode.build_ctcdecoder(
-        #     asr_model.decoder.vocabulary,
-        #     unigrams = unigrams,
-        #     kenlm_model_path=lm_path,  # either .arpa or .bin file
-        #     alpha=4.0,  # tuned on a val set
-        #     beta=3.0,  # tuned on a val set
-        #     unk_score_offset=-50.
-        # )
-        # num_cores = multiprocessing.cpu_count()
 
 
     # Parameters
@@ -497,21 +253,13 @@ if __name__ == "__main__":
     # Verbosity
     label_stages = True
 
-    # Q2 parameters. Only if satisfied will the Q2 network be used. Corresponds to adult decision rule about when to take an action
+    # Q2 parameters
     NUM_Q2_TRAINING_EPOCHS = 25
     Q2_BATCH_SIZE = 6
     Q2_ENTROPY_THRESHOLD = 1000
-    # Q2_GLOBALS = {
-    #     "MIN_DECODING_PROB" : .1,
-    #     "MAX_NOSPEECH_PROB" : .1,
-    #     "MAX_UNK_PROB" : .25,
-    #     "Q2_TIMEOUT" : .4
-    # }
 
-    
 
-    CONT = args.cont
-    
+    CONT = args.cont    
 
     # Load data
     dataset = AudioDataSet(datadir, SLICE_LEN, NUM_CATEG, timit_words)
@@ -605,8 +353,8 @@ if __name__ == "__main__":
     step = start_step
 
 
-    regenerate = False
-    if regenerate:
+    regenerate_Q2 = False
+    if regenerate_Q2:
         print('Training an Adult Q2 CNN Network')
         step = start_step
         for epoch in range(start_epoch + 1, NUM_Q2_TRAINING_EPOCHS):
@@ -687,14 +435,11 @@ if __name__ == "__main__":
 
                 fakes = G(z)
 
-                print('Figure out how to shuffle the reals')
-                import pdb
-                pdb.set_trace()                
-                #shuffled_reals = reals[:,torch.randperm(t.shape[1]),:]
-
-                penalty = gradient_penalty(G, D, reals, fakes, epsilon)
-
-                D_loss = torch.mean(D(fakes) - D(reals) + LAMBDA * penalty)
+                # shuffle the reals so that the matched item for discrim is not necessarily from the same referent                
+                shuffled_reals = reals[torch.randperm(reals.shape[0]),:,:]
+                
+                penalty = gradient_penalty(G, D, shuffled_reals, fakes, epsilon)
+                D_loss = torch.mean(D(fakes) - D(shuffled_reals) + LAMBDA * penalty)
                 writer.add_scalar('Loss/D', D_loss.detach().item(), step)
                 D_loss.backward()
                 if label_stages:
@@ -883,10 +628,7 @@ if __name__ == "__main__":
                         if label_stages:
                             print('Q -> G update')
                         
-                        optimizer_Q_to_QG.zero_grad()
-                        print('Inspect Q-> G update')
-                        import pdb
-                        pdb.set_trace()
+                        optimizer_Q_to_QG.zero_grad()                        
                         Q_production_loss = criterion_Q(Q(G(z)), c[:,0:NUM_CATEG]) # Note we exclude the UNK label --  child never intends to produce unk
                         Q_production_loss.backward()
                         writer.add_scalar('Loss/Q to G', Q_production_loss.detach().item(), step)

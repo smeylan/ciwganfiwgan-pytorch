@@ -213,11 +213,13 @@ def whisper_recognize_wavs(filenames, fast_whisper_model, vocab, timit_words, Q2
     return(indices_of_recognized_words, probabilities, whisper_recognition_info)
 
 def Q2_cnn(selected_candidate_wavs, Q2):
+    print('in Q2_cnn')
     Q2_probs = torch.softmax(Q2(selected_candidate_wavs), dim=1)
-    zeros = torch.zeros([Q2_probs.shape[0],1], device = device)
+    # add a column for UNKs
+    zeros = torch.zeros([Q2_probs.shape[0],1], device = device) + .00000001
     Q_network_probs_with_unk = torch.hstack((Q2_probs, zeros))
-    indices_of_recognized_words = range(Q_network_probs_with_unk.shape[0])
-    return(indices_of_recognized_words, Q_network_probs_with_unk)
+    #indices_of_recognized_words = range(Q_network_probs_with_unk.shape[0])
+    return(Q_network_probs_with_unk)
 
 def write_out_wavs(G_z_2d, labels, timit_words, epoch):
     # returns probabilities and a set of indices; takes a smaller number of arguments
@@ -335,22 +337,24 @@ def batch_transcribe_with_pyctcdecoder(files, lm_path, unigram_list, asr_model, 
     
 
 def mark_unks_in_Q2(Q_network_probs, threshold, device):
+    print('in mark_unks_in_Q2')
     # need a little prob mass on the UNKs to avoid numerical errors if this is the Q network     
 
-    unk_tensor = torch.zeros([1, Q_network_probs.shape[1]], device = device)
-    unk_tensor += .0001
-    unk_tensor[0,-1] = .999999
+    #unk_tensor = torch.zeros([1, Q_network_probs.shape[1]], device = device)
+    #unk_tensor += .0001
+    #unk_tensor[0,-1] = .999999
 
     # compute entropies
     log_probs = torch.log(Q_network_probs + .000000001)
     prod = Q_network_probs * log_probs
     entropy = -torch.sum(prod, dim =1)        
+    
+    indices_of_recognized_words = torch.argwhere( entropy <= torch.Tensor([threshold]).to(device)).flatten()
 
-    unks_to_mark = torch.argwhere( entropy > torch.Tensor([threshold]).to(device))
-    indices_of_recognized_words = torch.argwhere( entropy <= torch.Tensor([threshold]).to(device))
+    # unks_to_mark = torch.argwhere( entropy > torch.Tensor([threshold]).to(device))
+    # if len(unks_to_mark) > 0:
+    #     Q_network_probs[unks_to_mark,] = unk_tensor    
 
-    if len(indices_of_recognized_words) > 0:
-        Q_network_probs[unks_to_mark,] = unk_tensor
     return(indices_of_recognized_words, Q_network_probs)
 
 
@@ -496,7 +500,7 @@ if __name__ == "__main__":
     # Q2 parameters. Only if satisfied will the Q2 network be used. Corresponds to adult decision rule about when to take an action
     NUM_Q2_TRAINING_EPOCHS = 25
     Q2_BATCH_SIZE = 6
-    Q2_ENTROPY_THRESHOLD = .1
+    Q2_ENTROPY_THRESHOLD = 1000
     # Q2_GLOBALS = {
     #     "MIN_DECODING_PROB" : .1,
     #     "MAX_NOSPEECH_PROB" : .1,
@@ -783,14 +787,17 @@ if __name__ == "__main__":
                         selected_Q_estimates = torch.vstack(selected_Q_estimates)  
 
 
-                        print('Recognizing G output with Q2 model...')  
-                        indices_of_recognized_words, Q2_probs = Q2_cnn(selected_candidate_wavs.unsqueeze(1), Q2) 
+                        print('Recognizing G output with Q2 model...')                        
+                        Q2_probs = Q2_cnn(selected_candidate_wavs.unsqueeze(1), Q2) 
 
                         indices_of_recognized_words, Q2_probs_with_unks  = mark_unks_in_Q2(Q2_probs, Q2_ENTROPY_THRESHOLD, device)
 
+                        print('Finished marking unks')
+                        print(indices_of_recognized_words)
 
                         total_recognized_words = len(indices_of_recognized_words)
                         print('Word recognition complete. Found '+str(len(indices_of_recognized_words))+' of '+str(Q2_BATCH_SIZE*NUM_CATEG)+' words')
+
                         
                         criterion_Q2 = lambda inpt, target: torch.nn.CrossEntropyLoss()(inpt, target.max(dim=1)[1])
 
@@ -814,9 +821,11 @@ if __name__ == "__main__":
 
                             if not torch.equal(torch.argmax(selected_referents, dim=1), torch.argmax(Q_prediction, dim =1)):
                                 print("Child model produced an utterance that they don't think will invoke the correct action. Consider choosing action from a larger set of actions. Disregard if this is early in training and the Q network is not trained yet.")
+                   
                                                     
                             # compute the cross entropy between the Q network and the Q2 outputs, which are class labels recovered by the adults
                             Q2_loss = criterion_Q2(augmented_Q_prediction[indices_of_recognized_words], Q2_probs_with_unks[indices_of_recognized_words])    
+                            
 
                             # count the number of words correctly recovered: referent -> recognized by listener
                             recovered = torch.eq(torch.argmax(augmented_Q_prediction[indices_of_recognized_words], dim=1), torch.argmax(Q2_probs_with_unks[indices_of_recognized_words], dim=1)).cpu().numpy().tolist()
@@ -834,27 +843,21 @@ if __name__ == "__main__":
                             optimizer_Q2_to_Q.step()
 
                             total_recovered = np.sum(recovered)
-                            prop_recognized = total_recovered / total_recognized_words
-                            writer.add_scalar('Loss/Q2 to Q', Q2_loss, step)
+                            # number of recovereed over the num
+                            prop_recovered_of_recognized = total_recovered / total_recognized_words
+                            writer.add_scalar('Loss/Q2 to Q', Q2_loss.detach().item(), step)
 
                         else:
-                            print('What to do if there are no words recognized')
                             total_recovered = 0
-                            prop_recognized = 0
+                            prop_recovered_of_recognized = 0
 
-                        
-                        import pdb
-                        pdb.set_trace()
-                        writer.add_scalar('Metric/Proportion Recovered Words Among Recognized', prop_recognized, step)
+                        writer.add_scalar('Metric/Proportion Recovered Words Among Recognized', prop_recovered_of_recognized, step)
                         writer.add_scalar('Metric/Proportion Recovered Words Among Total', total_recovered / (Q2_BATCH_SIZE *NUM_CATEG), step)
-                        writer.add_scalar('Metric/Proportion Recognized Words Among Total', total_recognized_words / (Q2_BATCH_SIZE *NUM_CATEG), step)
-                        
-
-                        print('finished loop')
+                        writer.add_scalar('Metric/Proportion Recognized Words Among Total', total_recognized_words / (Q2_BATCH_SIZE *NUM_CATEG), step)                        
 
                     elif train_Q:         
                         if label_stages:
-                            print('Q ->  update')
+                            print('Q -> G update')
                         
                         optimizer_Q_to_G.zero_grad()
                         Q_production_loss = criterion_Q(Q(G(z)), c[:,0:NUM_CATEG]) # Note we exclude the UNK label --  child never intends to produce unk

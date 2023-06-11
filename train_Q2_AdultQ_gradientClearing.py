@@ -535,11 +535,11 @@ if __name__ == "__main__":
         if train_Q:
             Q = WaveGANQNetwork(slice_len=SLICE_LEN, num_categ=NUM_CATEG).to(device).train()
             #optimizer_Q_to_G = optim.RMSprop(G.parameters(), lr=LEARNING_RATE)
-            optimizer_Q_to_QG = optim.RMSprop(it.chain(G.parameters(), Q.parameters()), lr=LEARNING_RATE)            
+            optimizer_Q_to_QG = optim.RMSprop(Q.parameters(), lr=LEARNING_RATE)            
             # just update the G parameters
             if args.Q2:
                 Q2 = WaveGANQNetwork(slice_len=SLICE_LEN, num_categ=NUM_CATEG).to(device).train()
-                optimizer_Q2_to_QG = optim.RMSprop(it.chain(G.parameters(), Q.parameters()), lr=LEARNING_RATE)
+                optimizer_Q2_to_QG = optim.RMSprop(Q.parameters(), lr=LEARNING_RATE)
                 optimizer_Q2_to_Q2 = optim.RMSprop(Q2.parameters(), lr=LEARNING_RATE)
 
             if args.fiw:
@@ -676,22 +676,17 @@ if __name__ == "__main__":
                         c = torch.FloatTensor(BATCH_SIZE, NUM_CATEG).bernoulli_().to(device)
                     
                     else:                    
-                        c = torch.nn.functional.one_hot(torch.randint(0, NUM_CATEG, (BATCH_SIZE,)),
-                                                         num_classes=NUM_CATEG).to(device)
-                    
-                    z = torch.cat((labels, _z), dim=1)
+                        c = labels  
+                        
+                        # c = torch.nn.functional.one_hot(torch.randint(0, NUM_CATEG, (BATCH_SIZE,)),
+                        #                                 num_classes=NUM_CATEG).to(device)
+                    z = torch.cat((c, _z), dim=1)
                     #z = torch.cat((c, zeros, _z), dim=1)
                 else:
                     raise NotImplementedError
                     z = _z
 
                 fakes = G(z)
-
-                print('Figure out how to shuffle the reals')
-                import pdb
-                pdb.set_trace()                
-                #shuffled_reals = reals[:,torch.randperm(t.shape[1]),:]
-
                 penalty = gradient_penalty(G, D, reals, fakes, epsilon)
 
                 D_loss = torch.mean(D(fakes) - D(reals) + LAMBDA * penalty)
@@ -722,7 +717,7 @@ if __name__ == "__main__":
                     else:
                         z = _z
 
-                    G_z = G(z) # generate again using the same labels
+                    G_z = G(z)
 
                     # G Loss
                     G_loss = torch.mean(-D(G_z))
@@ -737,7 +732,7 @@ if __name__ == "__main__":
 
                     if (epoch % WAV_OUTPUT_N == 0) & (i <= 1):
                          
-                        print('Sampling .wav outputs (but not running them through Q2)...')
+                        print('Sampling .wave outputs (but not running them through Q2)...')
                         write_out_wavs(G_z, labels, timit_words, epoch)                        
                         # but don't do anything with it; just let it write out all of the audio files
 
@@ -839,7 +834,7 @@ if __name__ == "__main__":
                             Q2_recovers_child = torch.eq(torch.argmax(selected_referents[indices_of_recognized_words], dim=1), torch.argmax(Q2_probs_with_unks[indices_of_recognized_words], dim=1)).cpu().numpy().tolist()
 
                                                                                                                  
-                            #this is where we would compute the loss
+                            Q2_loss.backward(retain_graph=True)                            
                                 
                             print('Gradients on the Q network:')
                             print('Q layer 0: '+str(np.round(torch.sum(torch.abs(Q.downconv_0.conv.weight.grad)).cpu().numpy(), 10)))
@@ -848,9 +843,8 @@ if __name__ == "__main__":
                             print('Q layer 3: '+str(np.round(torch.sum(torch.abs(Q.downconv_3.conv.weight.grad)).cpu().numpy(), 10)))
                             print('Q layer 4: '+str(np.round(torch.sum(torch.abs(Q.downconv_4.conv.weight.grad)).cpu().numpy(), 10)))
 
-                            #print('Q2 -> Q update!')
-                            #this is where we would do the step
-                            print('Would do Q2 -> Q update here, but not!')                            
+                            print('Q2 -> Q update!')
+                            optimizer_Q2_to_QG.step()
                             optimizer_Q2_to_QG.zero_grad()
 
                             total_Q_recovers_Q2 = np.sum(Q_recovers_Q2)
@@ -867,13 +861,13 @@ if __name__ == "__main__":
                         writer.add_scalar('Metric/Proportion Recognized Words Among Total', total_recognized_words / (Q2_BATCH_SIZE *NUM_CATEG), step)                        
                         
                         # Among those assigned a referent, how often does that agree with what the child intended
-                        #writer.add_scalar('Metric/Proportion of Referents Recovered from Q2', total_Q2_recovers_child / total_recognized_words, step)
+                        writer.add_scalar('Metric/Proportion of Referents Recovered from Q2', total_Q2_recovers_child / total_recognized_words, step)
 
                         # How often does the Q2 nework get back the right referent
                         writer.add_scalar('Metric/Number of Referents Recovered by Q2', total_Q2_recovers_child, step)
 
                         # Among those assigned a referent, how often does that agree with what the child intended
-                        #writer.add_scalar('Metric/Proportion that Q recovers from Q2 recognized', total_Q_recovers_Q2 / total_recognized_words, step)
+                        writer.add_scalar('Metric/Proportion that Q recovers from Q2 recognized', total_Q_recovers_Q2 / total_recognized_words, step)
 
                         # How often does the Q network repliacte the Q2 network
                         writer.add_scalar('Metric/Number of Q2 references replicated by Q', total_Q_recovers_Q2, step)
@@ -884,9 +878,6 @@ if __name__ == "__main__":
                             print('Q -> G update')
                         
                         optimizer_Q_to_QG.zero_grad()
-                        print('Inspect Q-> G update')
-                        import pdb
-                        pdb.set_trace()
                         Q_production_loss = criterion_Q(Q(G(z)), c[:,0:NUM_CATEG]) # Note we exclude the UNK label --  child never intends to produce unk
                         Q_production_loss.backward()
                         writer.add_scalar('Loss/Q to G', Q_production_loss.detach().item(), step)

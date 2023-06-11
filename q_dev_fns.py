@@ -74,10 +74,14 @@ def evaluate_asr_system(ASR_probs, Y, device, timit_words, filenames):
     # full_performance: how good is the performance, treating UNK as a word
     rdict['full_performance'] = full_performance 
     
-    # how good is the system at recognizing UNKs
-    rdict['unk_precision'] =  rdf.loc[(rdf['asr system label'] == 'UNK') & (rdf['human label'] == 'UNK')].shape[0] / rdf.loc[rdf['asr system label'] == 'UNK'].shape[0]
-    # did we get all of the human-labeled unks
-    rdict['unk_recall'] = rdf.loc[(rdf['human label'] == 'UNK') & (rdf['asr system label'] == 'UNK')].shape[0] / rdf.loc[rdf['human label'] == 'UNK'].shape[0]
+    if rdf.loc[rdf['asr system label'] == 'UNK'].shape[0] > 0:
+        # how good is the system at recognizing UNKs
+        rdict['unk_precision'] =  rdf.loc[(rdf['asr system label'] == 'UNK') & (rdf['human label'] == 'UNK')].shape[0] / rdf.loc[rdf['asr system label'] == 'UNK'].shape[0]
+        # did we get all of the human-labeled unks
+        rdict['unk_recall'] = rdf.loc[(rdf['human label'] == 'UNK') & (rdf['asr system label'] == 'UNK')].shape[0] / rdf.loc[rdf['human label'] == 'UNK'].shape[0]
+    else: 
+        rdict['unk_precision'] = np.nan
+        rdict['unk_recall'] = np.nan
     
 
     # among items the model does not think are UNK, how many matches?

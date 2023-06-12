@@ -22,15 +22,7 @@ import copy
 import string
 from Levenshtein import distance as lev
 import glob 
-
-# For Whisper 
-import faster_whisper
-import string
-import signal
-from Levenshtein import distance as lev
-from contextlib import contextmanager
 import gc
-from varname import nameof
 
 torch.autograd.set_detect_anomaly(True)
 
@@ -198,7 +190,12 @@ if __name__ == "__main__":
     parser.add_argument(
         '--Q2',
         action='store_true',
-        help='Update the Q network to predict a secondary Q network, corresponding to the adult listener'
+        help='Evaluate outputs with the Q2 network; to backpropogate from Q2 to Q see "backprop_from_Q2"'
+    )
+    parser.add_argument(
+        '--backprop_from_Q2',
+        action='store_true',
+        help='Update the Q network from the Q2'
     )
 
     # Q-net Arguments
@@ -213,6 +210,7 @@ if __name__ == "__main__":
         action='store_true',
         help='Trains a fiwgan'
     )
+
 
     args = parser.parse_args()
     train_Q = args.ciw or args.fiw
@@ -471,7 +469,7 @@ if __name__ == "__main__":
                     if (i != 0) and train_Q2 and (i % WAVEGAN_Q2_NUPDATES == 0) & (epoch >= Q2_EPOCH_START):
                         
                         if label_stages:
-                            print('Starting Q2 -> Q update')                        
+                            print('Starting Q2 evaluation...')                        
 
 
                         optimizer_Q2_to_QG.zero_grad() # clear the gradients for the Q update
@@ -566,8 +564,10 @@ if __name__ == "__main__":
 
                                                                                                                  
                             #this is where we would compute the loss
-                            if train_Q2:
+                            if args.backprop_from_Q2:
                                 Q2_loss.backward(retain_graph=True)
+                            else:
+                                print('Computing Q2 network loss but not backpropagating...')
                                 
                             print('Gradients on the Q network:')
                             print('Q layer 0: '+str(np.round(torch.sum(torch.abs(Q.downconv_0.conv.weight.grad)).cpu().numpy(), 10)))
@@ -578,7 +578,7 @@ if __name__ == "__main__":
 
                             #print('Q2 -> Q update!')
                             #this is where we would do the step
-                            if train_Q2:
+                            if args.backprop_from_Q2:
                                 print('Q2 -> Q update!')
                                 optimizer_Q2_to_QG.step()
                             optimizer_Q2_to_QG.zero_grad()

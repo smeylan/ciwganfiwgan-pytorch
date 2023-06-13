@@ -1,0 +1,50 @@
+{
+	"defaults":
+	{
+		"architecture": "ciwgan",
+		"track_q2": 1,
+		"data_dir": "data/TIMIT_padded_smallVocab",
+		"logdir": "logs",
+		"batch_size": 192,
+		"num_epochs": 5000,
+		"wandb_group": "om_test1",
+		"wandb_project": "mnll-onehots",
+		"vocab": "'dark greasy water year'"
+	},
+	"models": [
+		{
+			"wandb_id": "no_q2_backprop",
+			"backprop_from_Q2": 0
+		},
+		{
+			"wandb_id": "q2_backprop",
+			"backprop_from_Q2": 1
+		},
+		{
+			"wandb_id": "pretraining",
+			"backprop_from_Q2": 0,
+			"production_start_epoch": 25,
+			"comprehension_interval": 3
+		},
+		{
+			"wandb_id": "q2_backprop_and_pretraining",
+			"backprop_from_Q2": 1,
+			"production_start_epoch": 25,
+			"comprehension_interval": 3
+		}
+	],
+	"slurm":
+	{
+		"script": "train_Q2_readded.py",
+		"N": 1,
+		"partition": "cpl",
+		"mem_alloc_gb": 16,
+		"time_alloc_hrs_str": "24:00:00",
+		"cpus_per_task": 12,
+		"n_tasks": 1,
+		"gpu_constraint": "any-A100",
+		"singularity_version": "openmind/singularity/3.9.5",
+		"exclusion_list": "node082,node083,node100",
+		"slurm_folder":"slurm_logs"
+	}
+}

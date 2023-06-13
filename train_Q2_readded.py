@@ -23,11 +23,12 @@ import string
 from Levenshtein import distance as lev
 import glob 
 import gc
+import wandb
 
 torch.autograd.set_detect_anomaly(True)
 
 class AudioDataSet:
-    def __init__(self, datadir, slice_len, NUM_CATEG, timit_words):
+    def __init__(self, datadir, slice_len, NUM_CATEG, vocab):
         print("Loading data")
         dir = os.listdir(datadir)
         x = np.zeros((len(dir), 1, slice_len))
@@ -53,7 +54,7 @@ class AudioDataSet:
 
             # extract the label
             word = file.split('_')[0]
-            j = timit_words.index(word)
+            j = vocab.index(word)
             y[i, j] = 1            
             i += 1
 
@@ -92,10 +93,10 @@ def Q2_cnn(selected_candidate_wavs, Q2):
     #indices_of_recognized_words = range(Q_network_probs_with_unk.shape[0])
     return(Q_network_probs_with_unk)
 
-def write_out_wavs(G_z_2d, labels, timit_words, epoch):
+def write_out_wavs(G_z_2d, labels, vocab, logdir, epoch):
     # returns probabilities and a set of indices; takes a smaller number of arguments
     files_for_asr = []
-    epoch_path = os.path.join("temp",str(epoch))
+    epoch_path = os.path.join(logdir,'audio_files',str(epoch))
     if not os.path.exists(epoch_path):
         os.makedirs(epoch_path)    
 
@@ -103,7 +104,7 @@ def write_out_wavs(G_z_2d, labels, timit_words, epoch):
     # for each file in the batch, write out a wavfile
     for j in range(G_z_2d.shape[0]):
         audio_buffer = G_z_2d[j,:].detach().cpu().numpy()          
-        true_word = timit_words[np.argwhere(labels_local[j,:])[0][0]]
+        true_word = vocab[np.argwhere(labels_local[j,:])[0][0]]
         tf = os.path.join(epoch_path,true_word + '_' + str(uuid.uuid4())+".wav")
         write(tf, 16000, audio_buffer[0])
         files_for_asr.append(copy.copy(tf))
@@ -135,17 +136,25 @@ def mark_unks_in_Q2(Q_network_probs, threshold, device):
 if __name__ == "__main__":
     # Training Arguments
     parser = argparse.ArgumentParser()
+    
     parser.add_argument(
-        '--datadir',
+        '--logdir',
         type=str,
         required=True,
-        help='Training Directory'
+        help='Log/Results Directory. Results will be stored by wandb_group / wandb_id / epoch (see below)'
+    )
+
+    parser.add_argument(
+        '--architecture',
+        type=str,
+        required=True,
+        help='Architecure. Can be ciwgan for fiwgan (fiwgan is not implemented yet)'
     )
     parser.add_argument(
         '--logdir',
         type=str,
         required=True,
-        help='Log/Results Directory'
+        help='Log/Results Directory. Results will be stored by wandb_group / wandb_id / epoch (see below)'
     )
     parser.add_argument(
         '--num_categ',
@@ -198,53 +207,120 @@ if __name__ == "__main__":
         help='Update the Q network from the Q2'
     )
 
-    # Q-net Arguments
-    Q_group = parser.add_mutually_exclusive_group()
-    Q_group.add_argument(
-        '--ciw',
+    parser.add_argument(
+        '--production_start_epoch',
         action='store_true',
-        help='Trains a ciwgan'
-    )
-    Q_group.add_argument(
-        '--fiw',
-        action='store_true',
-        help='Trains a fiwgan'
+        help='Do n-1 epochs of pretraining the child Q network in the reference game. 0 means produce from the beginning',
+        default=0
     )
 
+    parser.add_argument(
+        '--comprehension_interval',
+        type=int,
+        help='How often, in terms of epochs should the Q network be re-trained in the reference game. THe high default means that this is never run',
+        default = 10000000
+    )
+
+    parser.add_argument(
+        '--q2_entropy_threshold',
+        type=float,
+        help="Float representing the entropy interval. If none of the referents reaches .25, put all probability mass on the final category of UNK, and then don't packprop from it",
+        default=.25
+    )
+
+    parser.add_argument(
+        '--keep_intermediate_epochs',
+        action='store_true',
+        help='Keep previous checkpoints after a new one is saved?',
+        default=False
+    )
+
+    parser.add_argument(
+        '--wandb_project',
+        type=str,
+        help='Name of the project for tracking in Weights and Biases',        
+    )
+
+    parser.add_argument(
+        '--wandb_group',
+        type=str,
+        help='Name of the group / experiment to which this version (id) belongs',        
+    )
+
+    parser.add_argument(
+        '--wandb_id',
+        type=str,
+        help='Name of this specific run (distinguishing it from others in the group)',        
+    )
+
+    parser.add_argument(
+        '--wavegan_disc_nupdates',
+        type=int,
+        help='On what interval, in steps, should the discriminator be updated? On other steps, the model updates the generator',
+        default = 4
+    )
+
+    parser.add_argument(
+        '--wavegan_q2_nupdates',
+        type=int,
+        help='On what interval, in steps, should the loss on the Q prediction of the Q2 labels be used to update the ! network ',
+        default = 8
+    )
+
+    parser.add_argument(
+        '--learning_rate',
+        type=float,
+        help="Float for the learning rate",
+        default=1e-4
+    )
+
+    parser.add_argument(
+        '--num_q2_training_epochs',
+        type=int,
+        help='Number of epochs to traine the adult model',
+        default = 25
+    )
+
+
+    parser.add_argument(
+        '--q2_batch_size',
+        type=int,
+        help='Number of candidates to evaluate for each word to choose the best candidate',
+        default = 6
+    )
 
     args = parser.parse_args()
     train_Q = args.ciw or args.fiw
     train_Q2 = args.Q2
-    if args.fiw and args.Q2:
+    if args.architecture == 'fiwgan':
         raise ValueError('Untested -- what happens with the feature representations')
-    if args.Q2:
-        #timit_words = "she had your suit in dark greasy wash water all year".split(' ')+['UNK']
-        timit_words = "dark greasy water year".split(' ')+['UNK']
+    if args.Q2:        
+        vocab = args.vocab.split(' ')+['UNK']
 
     # Parameters
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     datadir = args.datadir
-    logdir = args.logdir
+    logdir = os.path.join(args.logdir, args.wandb_group, args.wandb_id)
     
     # Epochs and Intervals
     NUM_EPOCHS = args.num_epochs
-    WAVEGAN_DISC_NUPDATES = 4
-    WAVEGAN_Q2_NUPDATES = 8
-    Q2_EPOCH_START = 0
+    WAVEGAN_DISC_NUPDATES = args.wavegan_disc_nupdates
+    WAVEGAN_Q2_NUPDATES = args.wavegan_q2_nupdates
+    Q2_EPOCH_START = 0 # in case we want to only run Q2 after a certain epoch. Less of a concern when a fast Q2 is used
     WAV_OUTPUT_N = 5
     SAVE_INT = args.save_int
-    PRODUCTION_START_EPOCH = 0
-    COMPREHENSION_INTERVAL = 100000
+    PRODUCTION_START_EPOCH = args.production_start_epoch
+    COMPREHENSION_INTERVAL = args.comprehension_interval
 
 
     #Sizes of things
     SLICE_LEN = args.slice_len
-    NUM_CATEG = args.num_categ
+    NUM_CATEG = len(args.vocab)
     BATCH_SIZE = args.batch_size
 
     # GAN Learning rates
     LAMBDA = 10
-    LEARNING_RATE = 1e-4
+    LEARNING_RATE = args.learning_rate
     BETA1 = 0.5
     BETA2 = 0.9
     
@@ -252,15 +328,21 @@ if __name__ == "__main__":
     label_stages = True
 
     # Q2 parameters
-    NUM_Q2_TRAINING_EPOCHS = 25
-    Q2_BATCH_SIZE = 6
-    Q2_ENTROPY_THRESHOLD = .25
-
+    NUM_Q2_TRAINING_EPOCHS = args.num_q2_training_epochs
+    Q2_BATCH_SIZE = args.q2_batch_size
+    Q2_ENTROPY_THRESHOLD = args.q2_entropy_threshold
 
     CONT = args.cont    
 
+    wandb.init(        
+        project=args.wandb_project,        
+        config=args.__dict__,
+        group=args.wandb_group,
+        id = args.wandb_id
+    )
+
     # Load data
-    dataset = AudioDataSet(datadir, SLICE_LEN, NUM_CATEG, timit_words)
+    dataset = AudioDataSet(datadir, SLICE_LEN, NUM_CATEG, vocab)
     dataloader = DataLoader(
         dataset,
         BATCH_SIZE,
@@ -288,14 +370,16 @@ if __name__ == "__main__":
                 optimizer_Q2_to_QG = optim.RMSprop(it.chain(G.parameters(), Q.parameters()), lr=LEARNING_RATE)
                 optimizer_Q2_to_Q2 = optim.RMSprop(Q2.parameters(), lr=LEARNING_RATE)
 
-            if args.fiw:
+            if args.architecture == 'fiwgan':
                 print("Training a fiwGAN with ", NUM_CATEG, " categories.")
                 criterion_Q = torch.nn.BCEWithLogitsLoss()
-            elif args.ciw:
+            elif args.architecture == 'ciwgan':
                 print("Training a ciwGAN with ", NUM_CATEG, " categories.")
                 # NOTE: one hot -> category nr. transformation
                 # CE loss needs logit, category -> loss
-                criterion_Q = lambda inpt, target: torch.nn.CrossEntropyLoss()(inpt, target.max(dim=1)[1])                
+                criterion_Q = lambda inpt, target: torch.nn.CrossEntropyLoss()(inpt, target.max(dim=1)[1])
+            else:
+                raise ValueError('Architecure not recognized! Must be fiwgan or ciwgan')                
                 
             # if args.Q2:
             #     criterion_Q2 = lambda adult_interp, target: torch.nn.CrossEntropyLoss()(adult_interp, target.max(dim=1)[1]) 
@@ -367,6 +451,7 @@ if __name__ == "__main__":
                 Q2_comprehension_loss = criterion_Q(Q2_logits, labels[:,0:NUM_CATEG]) # Note we exclude the UNK label --  child never intends to produce unk
                 Q2_comprehension_loss.backward()
                 writer.add_scalar('Loss/Q2 to Q2', Q2_comprehension_loss.detach().item(), step)
+                wandb.log({"Loss/Q2 to Q2": Q2_comprehension_loss.detach().item()}, step=step)
                 optimizer_Q2_to_Q2.step()
                 step += 1
         torch.save(Q2, 'saved_networks/adult_pretrained_Q_network_'+str(NUM_CATEG)+'.torch')
@@ -403,6 +488,7 @@ if __name__ == "__main__":
                 Q_comprehension_loss = criterion_Q(child_recovers_from_adult, labels[:,0:NUM_CATEG]) # Note we exclude the UNK label --  child never intends to produce unk
                 Q_comprehension_loss.backward()
                 writer.add_scalar('Loss/Q to Q', Q_comprehension_loss.detach().item(), step)
+                wandb.log({"Loss/Q to Q": Q_comprehension_loss.detach().item()}, step=step)
                 optimizer_Q_to_Q.step()
                 step += 1
                             
@@ -426,6 +512,7 @@ if __name__ == "__main__":
                 penalty = gradient_penalty(G, D, shuffled_reals, fakes, epsilon)
                 D_loss = torch.mean(D(fakes) - D(shuffled_reals) + LAMBDA * penalty)
                 writer.add_scalar('Loss/D', D_loss.detach().item(), step)
+                wandb.log({"Loss/D": D_loss.detach().item()}, step=step)
                 D_loss.backward()
                 if label_stages:
                     print('Discriminator update!')
@@ -457,12 +544,13 @@ if __name__ == "__main__":
                     if label_stages:
                         print('Generator update!')
                     writer.add_scalar('Loss/G', G_loss.detach().item(), step)
+                    wandb.log({"Loss/G": G_loss.detach().item()}, step=step)
 
 
                     if (epoch % WAV_OUTPUT_N == 0) & (i <= 1):
                          
                         print('Sampling .wav outputs (but not running them through Q2)...')
-                        write_out_wavs(G_z_for_G_update, c, timit_words, epoch)                        
+                        write_out_wavs(G_z_for_G_update, c, vocab, logdir, epoch)                        
                         # but don't do anything with it; just let it write out all of the audio files
                 
                     # Q2 Loss: Update G and Q to better imitate the Q2 model
@@ -588,6 +676,9 @@ if __name__ == "__main__":
                             total_Q2_recovers_child = np.sum(Q2_recovers_child)
                             
                             writer.add_scalar('Loss/Q2 to Q', Q2_loss.detach().item(), step)
+                            wandb.log({"Loss/Q2 to Q": Q2_loss.detach().item()}, step=step)
+
+
 
                         else:
                             total_Q_recovers_Q2 = 0
@@ -595,19 +686,22 @@ if __name__ == "__main__":
 
 
                         # proportion of words that Q2 assigns a referent to (ie, what proportion are not unknown)
-                        writer.add_scalar('Metric/Proportion Recognized Words Among Total', total_recognized_words / (Q2_BATCH_SIZE *NUM_CATEG), step)                        
+                        writer.add_scalar('Metric/Proportion Recognized Words Among Total', total_recognized_words / (Q2_BATCH_SIZE *NUM_CATEG), step)
+                        wandb.log({"Metric/Proportion Recognized Words Among Total": total_recognized_words / (Q2_BATCH_SIZE *NUM_CATEG)}, step=step)                        
                         
                         # Among those assigned a referent, how often does that agree with what the child intended
                         #writer.add_scalar('Metric/Proportion of Referents Recovered from Q2', total_Q2_recovers_child / total_recognized_words, step)
 
                         # How often does the Q2 nework get back the right referent
                         writer.add_scalar('Metric/Number of Referents Recovered by Q2', total_Q2_recovers_child, step)
+                        wandb.log({"Metric/Number of Referents Recovered by Q2": total_Q2_recovers_child}, step=step)
 
                         # Among those assigned a referent, how often does that agree with what the child intended
                         #writer.add_scalar('Metric/Proportion that Q recovers from Q2 recognized', total_Q_recovers_Q2 / total_recognized_words, step)
 
                         # How often does the Q network repliacte the Q2 network
                         writer.add_scalar('Metric/Number of Q2 references replicated by Q', total_Q_recovers_Q2, step)
+                        wandb.log({"Metric/Number of Q2 references replicated by Q": total_Q_recovers_Q2}, step=step)
 
 
                         
@@ -627,6 +721,7 @@ if __name__ == "__main__":
                     Q_production_loss = criterion_Q(Q(G_z_for_Q_update), c[:,0:NUM_CATEG]) # Note we exclude the UNK label --  child never intends to produce unk
                     Q_production_loss.backward()
                     writer.add_scalar('Loss/Q to G', Q_production_loss.detach().item(), step)
+                    wandb.log({"Loss/Q to G": Q_production_loss.detach().item()}, step=step)
                     optimizer_Q_to_QG.step()
                     optimizer_Q_to_QG.zero_grad()
 
@@ -634,6 +729,7 @@ if __name__ == "__main__":
                 step += 1
 
         if epoch % SAVE_INT == 0:
+
             if G is not None:
                 torch.save(G.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_G.pt'))
             if D is not None:
@@ -650,3 +746,12 @@ if __name__ == "__main__":
                 torch.save(optimizer_Q_to_QG.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_Q_to_Gopt.pt'))            
             if train_Q2 and optimizer_Q2_to_QG is not None:
                 torch.save(optimizer_Q2_to_QG.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_Q_to_Q2opt.pt'))
+            
+
+            if args.keep_intermediate_epochs:
+                pass
+            else:
+                if ('last_path_prefix' in locals()) or ('last_path_prefix' in globals()):
+                    os.system('rm '+last_path_prefix)
+
+            last_path_prefix = os.path.join(logdir, 'epoch'+str(epoch)+'_step'+str(step)+'*')

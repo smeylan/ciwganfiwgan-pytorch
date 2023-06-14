@@ -136,13 +136,6 @@ def mark_unks_in_Q2(Q_network_probs, threshold, device):
 if __name__ == "__main__":
     # Training Arguments
     parser = argparse.ArgumentParser()
-    
-    parser.add_argument(
-        '--logdir',
-        type=str,
-        required=True,
-        help='Log/Results Directory. Results will be stored by wandb_group / wandb_id / epoch (see below)'
-    )
 
     parser.add_argument(
         '--architecture',

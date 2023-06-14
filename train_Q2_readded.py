@@ -144,11 +144,19 @@ if __name__ == "__main__":
         help='Architecure. Can be ciwgan for fiwgan (fiwgan is not implemented yet)'
     )
     parser.add_argument(
-        '--logdir',
+        '--log_dir',
         type=str,
         required=True,
         help='Log/Results Directory. Results will be stored by wandb_group / wandb_id / epoch (see below)'
     )
+
+    parser.add_argument(
+        '--data_dir',
+        type=str,
+        required=True,
+        help='directory with labeled waveforms'
+    )
+
     parser.add_argument(
         '--num_categ',
         type=int,
@@ -190,14 +198,14 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        '--Q2',
-        action='store_true',
-        help='Evaluate outputs with the Q2 network; to backpropogate from Q2 to Q see "backprop_from_Q2"'
+        '--track_q2',
+        type=int,
+        help='Track the results with the Q2 network; to backpropagate from Q2 to Q see "backprop_from_Q2"'
     )
     parser.add_argument(
         '--backprop_from_Q2',
-        action='store_true',
-        help='Update the Q network from the Q2'
+        type=int,
+        help='Update the Q network from the Q2 network'
     )
 
     parser.add_argument(
@@ -274,6 +282,12 @@ if __name__ == "__main__":
         default = 25
     )
 
+    parser.add_argument(
+        '--vocab',
+        type=str,
+        required=True,
+        help='Space-separated vocabulary. Indices of words here will be used as the ground truth.'
+    )
 
     parser.add_argument(
         '--q2_batch_size',
@@ -283,17 +297,17 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    train_Q = args.ciw or args.fiw
-    train_Q2 = args.Q2
+    train_Q = True
+    track_Q2 = bool(args.track_q2)
     if args.architecture == 'fiwgan':
         raise ValueError('Untested -- what happens with the feature representations')
-    if args.Q2:        
+    if track_Q2:        
         vocab = args.vocab.split(' ')+['UNK']
 
     # Parameters
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    datadir = args.datadir
-    logdir = os.path.join(args.logdir, args.wandb_group, args.wandb_id)
+    datadir = args.data_dir
+    logdir = os.path.join(args.log_dir, args.wandb_group, args.wandb_id)
     
     # Epochs and Intervals
     NUM_EPOCHS = args.num_epochs
@@ -308,7 +322,7 @@ if __name__ == "__main__":
 
     #Sizes of things
     SLICE_LEN = args.slice_len
-    NUM_CATEG = len(args.vocab)
+    NUM_CATEG = len(args.vocab.split(' '))
     BATCH_SIZE = args.batch_size
 
     # GAN Learning rates
@@ -358,7 +372,7 @@ if __name__ == "__main__":
             #optimizer_Q_to_G = optim.RMSprop(G.parameters(), lr=LEARNING_RATE)
             optimizer_Q_to_QG = optim.RMSprop(it.chain(G.parameters(), Q.parameters()), lr=LEARNING_RATE)            
             # just update the G parameters
-            if args.Q2:
+            if track_Q2:
                 Q2 = WaveGANQNetwork(slice_len=SLICE_LEN, num_categ=NUM_CATEG).to(device).train()
                 optimizer_Q2_to_QG = optim.RMSprop(it.chain(G.parameters(), Q.parameters()), lr=LEARNING_RATE)
                 optimizer_Q2_to_Q2 = optim.RMSprop(Q2.parameters(), lr=LEARNING_RATE)
@@ -547,7 +561,7 @@ if __name__ == "__main__":
                         # but don't do anything with it; just let it write out all of the audio files
                 
                     # Q2 Loss: Update G and Q to better imitate the Q2 model
-                    if (i != 0) and train_Q2 and (i % WAVEGAN_Q2_NUPDATES == 0) & (epoch >= Q2_EPOCH_START):
+                    if (i != 0) and track_Q2 and (i % WAVEGAN_Q2_NUPDATES == 0) & (epoch >= Q2_EPOCH_START):
                         
                         if label_stages:
                             print('Starting Q2 evaluation...')                        
@@ -737,7 +751,7 @@ if __name__ == "__main__":
                 torch.save(optimizer_D.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_Dopt.pt'))
             if train_Q:
                 torch.save(optimizer_Q_to_QG.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_Q_to_Gopt.pt'))            
-            if train_Q2 and optimizer_Q2_to_QG is not None:
+            if track_Q2 and optimizer_Q2_to_QG is not None:
                 torch.save(optimizer_Q2_to_QG.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_Q_to_Q2opt.pt'))
             
 

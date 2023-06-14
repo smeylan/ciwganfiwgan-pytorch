@@ -4,7 +4,7 @@
 		"architecture": "ciwgan",
 		"track_q2": 1,
 		"data_dir": "data/TIMIT_padded_smallVocab",
-		"logdir": "logs",
+		"log_dir": "logs",
 		"batch_size": 192,
 		"num_epochs": 5000,
 		"wandb_group": "om_test1",

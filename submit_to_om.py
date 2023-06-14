@@ -15,7 +15,8 @@ def gen_one_model_submission_script(model, singularity_base_command, slurm_param
     commands.append("#!/bin/bash -e\n")
     
     commands.append("\n#SBATCH -N 1\n")                         
-    commands.append(f"#SBATCH -p {slurm_params['partition']}\n")    
+    if 'partition' in slurm_params:
+        commands.append(f"#SBATCH -p {slurm_params['partition']}\n")    
     commands.append(f"#SBATCH -t {slurm_params['time_alloc_hrs_str']}\n")
     commands.append(f"#SBATCH --mem={slurm_params['mem_alloc_gb']}G\n")
     commands.append("#SBATCH --gres=gpu:1\n")

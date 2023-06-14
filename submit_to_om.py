@@ -29,7 +29,7 @@ def gen_one_model_submission_script(model, singularity_base_command, slurm_param
     commands.append('mkdir -p ~/.cache/$SLURM_JOB_ID\n')
     
     # append the actual command    
-    command = singularity_base_command + ' '+ slurm_params['script'] + convert_dict_to_command_line_args(model)
+    command = singularity_base_command + ' '+ slurm_params['script'] + ' ' + convert_dict_to_command_line_args(model)
     commands.append(f"\n{command}\n")
 
     # need to make sure that the directory exists

@@ -16,25 +16,25 @@ def gen_one_model_submission_script(model, singularity_base_command, slurm_param
     
     commands.append("\n#SBATCH -N 1\n")                         
     if 'partition' in slurm_params:
-        commands.append(f"#SBATCH -p {slurm_params['partition']}\n")    
-    commands.append(f"#SBATCH -t {slurm_params['time_alloc_hrs_str']}\n")
-    commands.append(f"#SBATCH --mem={slurm_params['mem_alloc_gb']}G\n")
+        commands.append("#SBATCH -p "+slurm_params['partition']+"\n")    
+    commands.append("#SBATCH -t "+slurm_params['time_alloc_hrs_str']+"\n")
+    commands.append("#SBATCH --mem="+str(slurm_params['mem_alloc_gb'])+"G\n")
     commands.append("#SBATCH --gres=gpu:1\n")
-    commands.append(f"#SBATCH --constraint={slurm_params['gpu_constraint']}\n")
-    commands.append(f"#SBATCH --exclude={slurm_params['exclusion_list']}\n")
-    commands.append(f"#SBATCH --ntasks={slurm_params['n_tasks']}\n")
-    commands.append(f"#SBATCH --cpus-per-task={slurm_params['cpus_per_task']}\n")
-    commands.append(f"#SBATCH --output={slurm_params['slurm_folder']}/%j.out\n")    
-    commands.append(f"\nmkdir -p {slurm_params['slurm_folder']}\n")    
-    commands.append(f"\nmodule load {slurm_params['singularity_version']}\n")        
+    commands.append("#SBATCH --constraint="+slurm_params['gpu_constraint']+"\n")
+    commands.append("#SBATCH --exclude="+slurm_params['exclusion_list']+"\n")
+    commands.append("#SBATCH --ntasks="+str(slurm_params['n_tasks'])+"\n")
+    commands.append("#SBATCH --cpus-per-task="+str(slurm_params['cpus_per_task'])+"\n")
+    #commands.append("#SBATCH --output="+slurm_params['slurm_folder']+"/%j.out\n")    
+    commands.append("\nmkdir -p "+slurm_params['slurm_folder']+"\n")    
+    commands.append("\nmodule load "+slurm_params['singularity_version']+"\n")        
     commands.append('mkdir -p ~/.cache/$SLURM_JOB_ID\n')
     
     # append the actual command    
     command = singularity_base_command + ' '+ slurm_params['script'] + ' ' + convert_dict_to_command_line_args(model)
-    commands.append(f"\n{command}\n")
+    commands.append("\n"+command+"\n")
 
     # need to make sure that the directory exists
-    os.system(f"mkdir -p SLURM/{model['wandb_group']}")
+    os.system("mkdir -p SLURM/"+model['wandb_group'])
     model_file = os.path.join('SLURM',model['wandb_group'],model['wandb_id']+'.sh')
 
     # write out the commands
@@ -46,7 +46,7 @@ def gen_one_model_submission_script(model, singularity_base_command, slurm_param
 def gen_all_models_submission_script(wandb_group, model_file_paths):
     text = ['#!/bin/bash -e\n']
     for model_file_path in  model_file_paths:
-        text.append('sbatch '+os.path.basename(model_file_path)+'\n')
+        text.append('sbatch '+model_file_path+'\n')
         
     submit_sh_path = os.path.join('SLURM', wandb_group, 'submit.sh') 
     
@@ -58,7 +58,7 @@ def gen_all_models_submission_script(wandb_group, model_file_paths):
     with open(submit_sh_path, 'w') as f:
         f.writelines(text)
     
-    subprocess.call(f'chmod u+x {submit_sh_path}', shell = True)
+    subprocess.call('chmod u+x '+submit_sh_path, shell = True)
 
 
 if __name__ == "__main__":

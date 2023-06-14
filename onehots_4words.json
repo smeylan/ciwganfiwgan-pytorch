@@ -7,7 +7,7 @@
 		"log_dir": "logs",
 		"batch_size": 192,
 		"num_epochs": 5000,
-		"wandb_group": "om_test1",
+		"wandb_group": "om_test4",
 		"wandb_project": "mnll-onehots",
 		"vocab": "'dark greasy water year'"
 	},

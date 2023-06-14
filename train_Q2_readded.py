@@ -210,7 +210,7 @@ if __name__ == "__main__":
 
     parser.add_argument(
         '--production_start_epoch',
-        action='store_true',
+        type=int,
         help='Do n-1 epochs of pretraining the child Q network in the reference game. 0 means produce from the beginning',
         default=0
     )
@@ -370,7 +370,8 @@ if __name__ == "__main__":
         if train_Q:
             Q = WaveGANQNetwork(slice_len=SLICE_LEN, num_categ=NUM_CATEG).to(device).train()
             #optimizer_Q_to_G = optim.RMSprop(G.parameters(), lr=LEARNING_RATE)
-            optimizer_Q_to_QG = optim.RMSprop(it.chain(G.parameters(), Q.parameters()), lr=LEARNING_RATE)            
+            optimizer_Q_to_QG = optim.RMSprop(it.chain(G.parameters(), Q.parameters()), lr=LEARNING_RATE)
+            optimizer_Q_to_Q = optim.RMSprop(Q.parameters(), lr=LEARNING_RATE)            
             # just update the G parameters
             if track_Q2:
                 Q2 = WaveGANQNetwork(slice_len=SLICE_LEN, num_categ=NUM_CATEG).to(device).train()
@@ -396,10 +397,10 @@ if __name__ == "__main__":
             #     criterion_QQ = None
             
 
-        return G, D, optimizer_G, optimizer_D, Q, Q2, optimizer_Q_to_QG, optimizer_Q2_to_QG, optimizer_Q2_to_Q2, criterion_Q
+        return G, D, optimizer_G, optimizer_D, Q, Q2, optimizer_Q_to_QG, optimizer_Q2_to_QG, optimizer_Q2_to_Q2, criterion_Q, optimizer_Q_to_Q
 
     # Load models
-    G, D, optimizer_G, optimizer_D, Q, Q2, optimizer_Q_to_QG, optimizer_Q2_to_QG, optimizer_Q2_to_Q2, criterion_Q = make_new()
+    G, D, optimizer_G, optimizer_D, Q, Q2, optimizer_Q_to_QG, optimizer_Q2_to_QG, optimizer_Q2_to_Q2, criterion_Q, optimizer_Q_to_Q = make_new()
         
     
     start_epoch = 0
@@ -519,7 +520,8 @@ if __name__ == "__main__":
                 penalty = gradient_penalty(G, D, shuffled_reals, fakes, epsilon)
                 D_loss = torch.mean(D(fakes) - D(shuffled_reals) + LAMBDA * penalty)
                 writer.add_scalar('Loss/D', D_loss.detach().item(), step)
-                wandb.log({"Loss/D": D_loss.detach().item()}, step=step)
+                if (step % 6)  == 0:  
+                    wandb.log({"Loss/D": D_loss.detach().item()}, step=step)
                 D_loss.backward()
                 if label_stages:
                     print('Discriminator update!')

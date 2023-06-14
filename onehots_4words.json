@@ -37,12 +37,11 @@
 	{
 		"script": "train_Q2_readded.py",
 		"N": 1,
-		"partition": "cpl",
 		"mem_alloc_gb": 16,
 		"time_alloc_hrs_str": "24:00:00",
-		"cpus_per_task": 12,
+		"cpus_per_task": 6,
 		"n_tasks": 1,
-		"gpu_constraint": "any-A100",
+		"gpu_constraint": "high-capacity",
 		"singularity_version": "openmind/singularity/3.9.5",
 		"exclusion_list": "node082,node083,node100",
 		"slurm_folder":"slurm_logs"

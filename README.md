@@ -1,6 +1,6 @@
 # ciwganfiwgan-pytorch
 
-This is a PyTorch implementation of **Categorical Info WaveGAN (ciwGAN)** and **Featural Info WaveGAN (fiwGAN)** from [Beguš, 2021](https://www.sciencedirect.com/science/article/pii/S0893608021001052). The original code (in Tensorflow 1.12) can be found [here](https://github.com/gbegus/fiwGAN-ciwGAN). In this fork I invetigate the use of a 2nd Q network
+This is a PyTorch implementation of **Categorical Info WaveGAN (ciwGAN)** and **Featural Info WaveGAN (fiwGAN)** from [Beguš, 2021](https://www.sciencedirect.com/science/article/pii/S0893608021001052). The original code (in Tensorflow 1.12) can be found [here](https://github.com/gbegus/fiwGAN-ciwGAN). In this fork I invetigate the use of a 2nd Q network 
 
 ## Usage
 

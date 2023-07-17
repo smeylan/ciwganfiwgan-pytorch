@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from infowavegan import WaveGANGenerator, WaveGANDiscriminator, WaveGANQNetwork
-from utils import get_continuation_fname
+
 import tempfile
 import scipy
 import uuid
@@ -239,13 +239,6 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        '--resume_id',
-        type=str,
-        default="",
-        help='ID of this specific run to resume. Only specify this if you are resuming a run.',        
-    )
-
-    parser.add_argument(
         '--wavegan_disc_nupdates',
         type=int,
         help='On what interval, in steps, should the discriminator be updated? On other steps, the model updates the generator',
@@ -333,14 +326,11 @@ if __name__ == "__main__":
        'project' :  args.wandb_project,        
        'config' : args.__dict__,
        'group' : args.wandb_group,
-       'name' : args.wandb_name,
-       'resume' : args.resume_id != ""
+       'name' : args.wandb_name
     }
-    if args.resume_id:
-        kwargs['id'] = args.resume_id
     wandb.init(**kwargs)
 
-    logdir = os.path.join(args.log_dir, args.wandb_group, args.wandb_name, wandb.run.id if not args.resume_id else args.resume_id)
+    logdir = os.path.join(args.log_dir, args.wandb_group, args.wandb_name, wandb.run.id)
     if not os.path.exists(logdir):
         os.makedirs(logdir)
 
@@ -402,40 +392,7 @@ if __name__ == "__main__":
     start_epoch = 0
     start_step = 0
 
-    if args.resume_id.lower() != "":
-        
-        try:
-            print("Loading model from existing checkpoints...")
-
-            import pdb; pdb.set_trace()
-
-            fname, start_epoch = get_continuation_fname(logdir)
-            
-            G.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_G.pt")))
-            D.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_D.pt")))
-            if train_Q:
-                Q.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Q.pt")))
-                # there is no change over time to the Q2 network
-
-            optimizer_G.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Gopt.pt")))
-            optimizer_D.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Dopt.pt")))
-
-            if train_Q:
-                optimizer_Q_to_G.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Q_to_Gopt.pt")))
-                optimizer_Q_to_Q.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Q_to_Qopt.pt")))
-                optimizer_Q2_to_Q.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Q2_to_Qopt.pt")))
-                Q2.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Q2.pt")))
-
-            import pdb; pdb.set_trace()
-            start_step = int(re.search(r'_step(\d+).*', fname).group(1))
-            print(f"Successfully loaded model. Continuing training from epoch {start_epoch},"
-                  f" step {start_step}")
-        except:
-            import pdb; pdb.set_trace()
-            "Problem loading existing model!"
-        
-    else:
-        print("Starting a new training")
+    print("Starting a new training")
 
 
     step = start_step

@@ -35,7 +35,7 @@ def gen_one_model_submission_script(model, singularity_base_command, slurm_param
 
     # need to make sure that the directory exists
     os.system("mkdir -p SLURM/"+model['wandb_group'])
-    run_name_modifier = model['wandb_name'] + (f'_{model["resume_id"]}' if 'resume_id' in model else "")
+    run_name_modifier = model['wandb_name']
     model_file = os.path.join('SLURM',model['wandb_group'],run_name_modifier+'.sh')
 
     # write out the commands
@@ -99,7 +99,7 @@ if __name__ == "__main__":
         models_to_run.append(run_model_spec)
 
 
-    singularity_base_command = "singularity exec -B /om2:/om2 --env PYTHONPATH=/usr/local/lib/python3.8/dist-packages,WANDB_API_KEY=${WANDB_API_KEY} --nv /om2/user/smeylan/vagrant/menll_pytorch.sbx python3"
+    singularity_base_command = "singularity exec -B /om2/user/$USER --env PYTHONPATH=/usr/local/lib/python3.8/dist-packages,WANDB_API_KEY=${WANDB_API_KEY} --nv /om2/user/smeylan/vagrant/menll_pytorch.sbx python3"
 
     model_file_paths = [gen_one_model_submission_script(model, singularity_base_command, model_spec['slurm']) for model in models_to_run]
     

@@ -10,7 +10,6 @@ import torch
 import torch.optim as optim
 from scipy.io.wavfile import read, write
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from infowavegan import WaveGANGenerator, WaveGANDiscriminator, WaveGANQNetwork
@@ -147,7 +146,7 @@ if __name__ == "__main__":
         '--log_dir',
         type=str,
         required=True,
-        help='Log/Results Directory. Results will be stored by wandb_group / wandb_id / epoch (see below)'
+        help='Log/Results Directory. Results will be stored by wandb_group / wandb_name / wandb_id (see below)'
     )
 
     parser.add_argument(
@@ -180,14 +179,6 @@ if __name__ == "__main__":
         type=int,
         default=64,
         help='Batch size'
-    )
-    parser.add_argument(
-        '--cont',
-        type=str,
-        default="",
-        help='''continue: default from the last saved iteration. '''
-             '''Provide the epoch number if you wish to resume from a specific point'''
-             '''Or set "last" to continue from last available'''
     )
 
     parser.add_argument(
@@ -230,13 +221,6 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        '--keep_intermediate_epochs',
-        action='store_true',
-        help='Keep previous checkpoints after a new one is saved?',
-        default=False
-    )
-
-    parser.add_argument(
         '--wandb_project',
         type=str,
         help='Name of the project for tracking in Weights and Biases',        
@@ -249,9 +233,16 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        '--wandb_id',
+        '--wandb_name',
         type=str,
-        help='Name of this specific run (distinguishing it from others in the group)',        
+        help='Name of this specific run',        
+    )
+
+    parser.add_argument(
+        '--resume_id',
+        type=str,
+        default="",
+        help='ID of this specific run to resume. Only specify this if you are resuming a run.',        
     )
 
     parser.add_argument(
@@ -307,8 +298,7 @@ if __name__ == "__main__":
     # Parameters
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     datadir = args.data_dir
-    logdir = os.path.join(args.log_dir, args.wandb_group, args.wandb_id)
-    
+
     # Epochs and Intervals
     NUM_EPOCHS = args.num_epochs
     WAVEGAN_DISC_NUPDATES = args.wavegan_disc_nupdates
@@ -338,15 +328,21 @@ if __name__ == "__main__":
     NUM_Q2_TRAINING_EPOCHS = args.num_q2_training_epochs
     Q2_BATCH_SIZE = args.q2_batch_size
     Q2_ENTROPY_THRESHOLD = args.q2_entropy_threshold
+   
+    kwargs = {
+       'project' :  args.wandb_project,        
+       'config' : args.__dict__,
+       'group' : args.wandb_group,
+       'name' : args.wandb_name,
+       'resume' : args.resume_id != ""
+    }
+    if args.resume_id:
+        kwargs['id'] = args.resume_id
+    wandb.init(**kwargs)
 
-    CONT = args.cont    
-
-    wandb.init(        
-        project=args.wandb_project,        
-        config=args.__dict__,
-        group=args.wandb_group,
-        id = args.wandb_id
-    )
+    logdir = os.path.join(args.log_dir, args.wandb_group, args.wandb_name, wandb.run.id if not args.resume_id else args.resume_id)
+    if not os.path.exists(logdir):
+        os.makedirs(logdir)
 
     # Load data
     dataset = AudioDataSet(datadir, SLICE_LEN, NUM_CATEG, vocab)
@@ -406,12 +402,15 @@ if __name__ == "__main__":
     start_epoch = 0
     start_step = 0
 
-    if str(CONT).lower() != "":
+    if args.resume_id.lower() != "":
         
         try:
             print("Loading model from existing checkpoints...")
-            fname, start_epoch = get_continuation_fname(CONT, logdir)
 
+            import pdb; pdb.set_trace()
+
+            fname, start_epoch = get_continuation_fname(logdir)
+            
             G.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_G.pt")))
             D.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_D.pt")))
             if train_Q:
@@ -427,17 +426,18 @@ if __name__ == "__main__":
                 optimizer_Q2_to_Q.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Q2_to_Qopt.pt")))
                 Q2.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Q2.pt")))
 
+            import pdb; pdb.set_trace()
             start_step = int(re.search(r'_step(\d+).*', fname).group(1))
             print(f"Successfully loaded model. Continuing training from epoch {start_epoch},"
                   f" step {start_step}")
         except:
+            import pdb; pdb.set_trace()
             "Problem loading existing model!"
         
     else:
         print("Starting a new training")
 
-    # Set Up Writer
-    writer = SummaryWriter(logdir)
+
     step = start_step
 
 
@@ -458,7 +458,7 @@ if __name__ == "__main__":
                 
                 Q2_comprehension_loss = criterion_Q(Q2_logits, labels[:,0:NUM_CATEG]) # Note we exclude the UNK label --  child never intends to produce unk
                 Q2_comprehension_loss.backward()
-                writer.add_scalar('Loss/Q2 to Q2', Q2_comprehension_loss.detach().item(), step)
+
                 wandb.log({"Loss/Q2 to Q2": Q2_comprehension_loss.detach().item()}, step=step)
                 optimizer_Q2_to_Q2.step()
                 step += 1
@@ -495,7 +495,6 @@ if __name__ == "__main__":
                 child_recovers_from_adult = Q(reals)    
                 Q_comprehension_loss = criterion_Q(child_recovers_from_adult, labels[:,0:NUM_CATEG]) # Note we exclude the UNK label --  child never intends to produce unk
                 Q_comprehension_loss.backward()
-                writer.add_scalar('Loss/Q to Q', Q_comprehension_loss.detach().item(), step)
                 wandb.log({"Loss/Q to Q": Q_comprehension_loss.detach().item()}, step=step)
                 optimizer_Q_to_Q.step()
                 step += 1
@@ -519,7 +518,6 @@ if __name__ == "__main__":
                 
                 penalty = gradient_penalty(G, D, shuffled_reals, fakes, epsilon)
                 D_loss = torch.mean(D(fakes) - D(shuffled_reals) + LAMBDA * penalty)
-                writer.add_scalar('Loss/D', D_loss.detach().item(), step)
                 if (step % 6)  == 0:  
                     wandb.log({"Loss/D": D_loss.detach().item()}, step=step)
                 D_loss.backward()
@@ -552,7 +550,6 @@ if __name__ == "__main__":
                     optimizer_G.zero_grad()
                     if label_stages:
                         print('Generator update!')
-                    writer.add_scalar('Loss/G', G_loss.detach().item(), step)
                     wandb.log({"Loss/G": G_loss.detach().item()}, step=step)
 
 
@@ -684,10 +681,7 @@ if __name__ == "__main__":
                             total_Q_recovers_Q2 = np.sum(Q_recovers_Q2)
                             total_Q2_recovers_child = np.sum(Q2_recovers_child)
                             
-                            writer.add_scalar('Loss/Q2 to Q', Q2_loss.detach().item(), step)
                             wandb.log({"Loss/Q2 to Q": Q2_loss.detach().item()}, step=step)
-
-
 
                         else:
                             total_Q_recovers_Q2 = 0
@@ -695,21 +689,12 @@ if __name__ == "__main__":
 
 
                         # proportion of words that Q2 assigns a referent to (ie, what proportion are not unknown)
-                        writer.add_scalar('Metric/Proportion Recognized Words Among Total', total_recognized_words / (Q2_BATCH_SIZE *NUM_CATEG), step)
                         wandb.log({"Metric/Proportion Recognized Words Among Total": total_recognized_words / (Q2_BATCH_SIZE *NUM_CATEG)}, step=step)                        
-                        
-                        # Among those assigned a referent, how often does that agree with what the child intended
-                        #writer.add_scalar('Metric/Proportion of Referents Recovered from Q2', total_Q2_recovers_child / total_recognized_words, step)
 
                         # How often does the Q2 nework get back the right referent
-                        writer.add_scalar('Metric/Number of Referents Recovered by Q2', total_Q2_recovers_child, step)
                         wandb.log({"Metric/Number of Referents Recovered by Q2": total_Q2_recovers_child}, step=step)
 
-                        # Among those assigned a referent, how often does that agree with what the child intended
-                        #writer.add_scalar('Metric/Proportion that Q recovers from Q2 recognized', total_Q_recovers_Q2 / total_recognized_words, step)
-
                         # How often does the Q network repliacte the Q2 network
-                        writer.add_scalar('Metric/Number of Q2 references replicated by Q', total_Q_recovers_Q2, step)
                         wandb.log({"Metric/Number of Q2 references replicated by Q": total_Q_recovers_Q2}, step=step)
 
 
@@ -729,16 +714,13 @@ if __name__ == "__main__":
                     optimizer_Q_to_QG.zero_grad()                        
                     Q_production_loss = criterion_Q(Q(G_z_for_Q_update), c[:,0:NUM_CATEG]) # Note we exclude the UNK label --  child never intends to produce unk
                     Q_production_loss.backward()
-                    writer.add_scalar('Loss/Q to G', Q_production_loss.detach().item(), step)
                     wandb.log({"Loss/Q to G": Q_production_loss.detach().item()}, step=step)
                     optimizer_Q_to_QG.step()
                     optimizer_Q_to_QG.zero_grad()
 
-                    
                 step += 1
 
         if epoch % SAVE_INT == 0:
-
             if G is not None:
                 torch.save(G.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_G.pt'))
             if D is not None:
@@ -755,12 +737,8 @@ if __name__ == "__main__":
                 torch.save(optimizer_Q_to_QG.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_Q_to_Gopt.pt'))            
             if track_Q2 and optimizer_Q2_to_QG is not None:
                 torch.save(optimizer_Q2_to_QG.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_Q_to_Q2opt.pt'))
-            
 
-            if args.keep_intermediate_epochs:
-                pass
-            else:
-                if ('last_path_prefix' in locals()) or ('last_path_prefix' in globals()):
-                    os.system('rm '+last_path_prefix)
+            if ('last_path_prefix' in locals()) or ('last_path_prefix' in globals()):
+                os.system('rm '+last_path_prefix)
 
             last_path_prefix = os.path.join(logdir, 'epoch'+str(epoch)+'_step'+str(step)+'*')

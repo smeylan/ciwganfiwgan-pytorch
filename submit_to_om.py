@@ -12,7 +12,7 @@ def convert_dict_to_command_line_args(dict):
 def gen_one_model_submission_script(model, singularity_base_command, slurm_params):    
     
     commands = []
-    commands.append("#!/bin/bash -e\n")
+    commands.append("#!/bin/bash -l\n")
     
     commands.append("\n#SBATCH -N 1\n")                         
     if 'partition' in slurm_params:
@@ -35,7 +35,8 @@ def gen_one_model_submission_script(model, singularity_base_command, slurm_param
 
     # need to make sure that the directory exists
     os.system("mkdir -p SLURM/"+model['wandb_group'])
-    model_file = os.path.join('SLURM',model['wandb_group'],model['wandb_id']+'.sh')
+    run_name_modifier = model['wandb_name'] + (f'_{model["resume_id"]}' if 'resume_id' in model else "")
+    model_file = os.path.join('SLURM',model['wandb_group'],run_name_modifier+'.sh')
 
     # write out the commands
     with open(model_file, 'w') as f: f.writelines(commands)
@@ -44,7 +45,7 @@ def gen_one_model_submission_script(model, singularity_base_command, slurm_param
     return(model_file)
 
 def gen_all_models_submission_script(wandb_group, model_file_paths):
-    text = ['#!/bin/bash -e\n']
+    text = ['#!/bin/bash -l\n']
     for model_file_path in  model_file_paths:
         text.append('sbatch '+model_file_path+'\n')
         
@@ -60,6 +61,11 @@ def gen_all_models_submission_script(wandb_group, model_file_paths):
     
     subprocess.call('chmod u+x '+submit_sh_path, shell = True)
 
+def overwrite_defaults(model, defaults):
+    run_model_spec = copy.copy(defaults)
+    for key,value in model.items():
+        run_model_spec[key] = value   
+    return run_model_spec
 
 if __name__ == "__main__":
     # Training Arguments
@@ -89,9 +95,7 @@ if __name__ == "__main__":
 
     # add the individual models
     for model in model_listing:
-        run_model_spec = copy.copy(defaults)
-        for key,value in model.items():
-            run_model_spec[key] = value        
+        run_model_spec = overwrite_defaults(model, defaults)
         models_to_run.append(run_model_spec)
 
 

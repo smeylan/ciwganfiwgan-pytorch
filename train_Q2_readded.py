@@ -442,7 +442,7 @@ if __name__ == "__main__":
             
             reals = trial[0].to(device)
             labels = trial[1].to(device)
-
+           
             if (epoch <= PRODUCTION_START_EPOCH) or (epoch % COMPREHENSION_INTERVAL == 0):
                 # Just train the Q network from external data
                 if label_stages:
@@ -464,7 +464,7 @@ if __name__ == "__main__":
                 epsilon = torch.rand(BATCH_SIZE, 1, 1).repeat(1, 1, SLICE_LEN).to(device)
                 
                 c = torch.nn.functional.one_hot(torch.randint(0, NUM_CATEG, (BATCH_SIZE,)),
-                                                         num_classes=NUM_CATEG).to(device)
+                                                        num_classes=NUM_CATEG).to(device)
                 zeros = torch.zeros([BATCH_SIZE,1], device = device)
                 _z = torch.FloatTensor(BATCH_SIZE, 100 - (NUM_CATEG + 1)).uniform_(-1, 1).to(device)
                 z = torch.cat((c, zeros, _z), dim=1)
@@ -492,7 +492,7 @@ if __name__ == "__main__":
 
 
                     c = torch.nn.functional.one_hot(torch.randint(0, NUM_CATEG, (BATCH_SIZE,)),
-                             num_classes=NUM_CATEG).to(device)
+                            num_classes=NUM_CATEG).to(device)
                     _z = torch.FloatTensor(BATCH_SIZE, 100 - (NUM_CATEG + 1)).uniform_(-1, 1).to(device)
                     zeros = torch.zeros([BATCH_SIZE,1], device = device)
                     z = torch.cat((c, zeros, _z), dim=1)
@@ -511,7 +511,7 @@ if __name__ == "__main__":
 
 
                     if (epoch % WAV_OUTPUT_N == 0) & (i <= 1):
-                         
+                        
                         print('Sampling .wav outputs (but not running them through Q2)...')
                         write_out_wavs(G_z_for_G_update, c, vocab, logdir, epoch)                        
                         # but don't do anything with it; just let it write out all of the audio files
@@ -521,7 +521,6 @@ if __name__ == "__main__":
                         
                         if label_stages:
                             print('Starting Q2 evaluation...')                        
-
 
                         optimizer_Q2_to_QG.zero_grad() # clear the gradients for the Q update
 
@@ -572,7 +571,7 @@ if __name__ == "__main__":
                         print('Recognizing G output with Q2 model...')                        
                         Q2_probs = Q2_cnn(selected_candidate_wavs.unsqueeze(1), Q2) 
 
-                        indices_of_recognized_words, Q2_probs_with_unks  = mark_unks_in_Q2(Q2_probs, Q2_ENTROPY_THRESHOLD, device)
+                        indices_of_recognized_words, Q2_probs_with_unks  = train_utimark_unks_in_Q2(Q2_probs, Q2_ENTROPY_THRESHOLD, device)
 
                         print('Finished marking unks')
                         print(indices_of_recognized_words)
@@ -580,7 +579,7 @@ if __name__ == "__main__":
                         total_recognized_words = len(indices_of_recognized_words)
                         print('Word recognition complete. Found '+str(len(indices_of_recognized_words))+' of '+str(Q2_BATCH_SIZE*NUM_CATEG)+' words')
 
-                        
+                            
                         criterion_Q2 = lambda inpt, target: torch.nn.CrossEntropyLoss()(inpt, target.max(dim=1)[1])
 
 
@@ -603,7 +602,7 @@ if __name__ == "__main__":
 
                             if not torch.equal(torch.argmax(selected_referents, dim=1), torch.argmax(Q_prediction, dim =1)):
                                 print("Child model produced an utterance that they don't think will invoke the correct action. Consider choosing action from a larger set of actions. Disregard if this is early in training and the Q network is not trained yet.")
-                   
+                
                                                     
                             # compute the cross entropy between the Q network and the Q2 outputs, which are class labels recovered by the adults                            
                             Q2_loss = criterion_Q2(augmented_Q_prediction[indices_of_recognized_words], Q2_probs_with_unks[indices_of_recognized_words])    
@@ -613,7 +612,7 @@ if __name__ == "__main__":
                             Q_recovers_Q2 = torch.eq(torch.argmax(augmented_Q_prediction[indices_of_recognized_words], dim=1), torch.argmax(Q2_probs_with_unks[indices_of_recognized_words], dim=1)).cpu().numpy().tolist()
                             Q2_recovers_child = torch.eq(torch.argmax(selected_referents[indices_of_recognized_words], dim=1), torch.argmax(Q2_probs_with_unks[indices_of_recognized_words], dim=1)).cpu().numpy().tolist()
 
-                                                                                                                 
+                                                                                                                
                             #this is where we would compute the loss
                             if args.backprop_from_Q2:
                                 Q2_loss.backward(retain_graph=True)
@@ -656,11 +655,12 @@ if __name__ == "__main__":
 
 
                         
+                   
                     if label_stages:
                         print('Q -> G, Q update')
 
                     c = torch.nn.functional.one_hot(torch.randint(0, NUM_CATEG, (BATCH_SIZE,)),
-                             num_classes=NUM_CATEG).to(device)
+                            num_classes=NUM_CATEG).to(device)
                     _z = torch.FloatTensor(BATCH_SIZE, 100 - (NUM_CATEG + 1)).uniform_(-1, 1).to(device)
                     zeros = torch.zeros([BATCH_SIZE,1], device = device)
                     z = torch.cat((c, zeros, _z), dim=1)
@@ -692,7 +692,7 @@ if __name__ == "__main__":
                 torch.save(optimizer_D.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_Dopt.pt'))
             if train_Q:
                 torch.save(optimizer_Q_to_QG.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_Q_to_Gopt.pt'))            
-            if track_Q2 and optimizer_Q2_to_QG is not None:
+            if train_Q and track_Q2 and optimizer_Q2_to_QG is not None:
                 torch.save(optimizer_Q2_to_QG.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_Q_to_Q2opt.pt'))
 
             if ('last_path_prefix' in locals()) or ('last_path_prefix' in globals()):

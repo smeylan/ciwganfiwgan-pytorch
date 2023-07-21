@@ -67,6 +67,15 @@ class AudioDataSet:
     def __len__(self):
         return self.len
 
+def get_architecture_appropriate_c(architecture, num_categ, batch_size):
+    if architecture == 'ciwgan':
+        c = torch.nn.functional.one_hot(torch.randint(0, num_categ, (batch_size,)),
+                                                num_classes=num_categ).to(device)
+    elif architecture == 'fiwgan':
+        c = torch.FloatTensor(batch_size, num_categ).bernoulli_().to(device)
+    else:
+        assert False, "Architecture not recognized."
+    return c
 
 def gradient_penalty(G, D, reals, fakes, epsilon):
     x_hat = epsilon * reals + (1 - epsilon) * fakes
@@ -140,7 +149,7 @@ if __name__ == "__main__":
         '--architecture',
         type=str,
         required=True,
-        help='Architecure. Can be ciwgan for fiwgan (fiwgan is not implemented yet)'
+        help='Architecure. Can be ciwgan for fiwgan'
     )
     parser.add_argument(
         '--log_dir',
@@ -280,14 +289,21 @@ if __name__ == "__main__":
         default = 6
     )
 
+    parser.add_argument(
+        '--q2_q_noise_probability',
+        type=float,
+        help="Probability that the action taken by Q2 is affected by noise and does not match Q's referent",
+        default=0
+    )
+
     args = parser.parse_args()
     train_Q = True
     track_Q2 = bool(args.track_q2)
-    if args.architecture == 'fiwgan':
-        raise ValueError('Untested -- what happens with the feature representations')
     if track_Q2:        
         vocab = args.vocab.split(' ')+['UNK']
 
+    ARCHITECTURE = args.architecture
+    
     # Parameters
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     datadir = args.data_dir
@@ -322,11 +338,17 @@ if __name__ == "__main__":
     Q2_BATCH_SIZE = args.q2_batch_size
     Q2_ENTROPY_THRESHOLD = args.q2_entropy_threshold
    
+    gpu_properties = torch.cuda.get_device_properties('cuda')
     kwargs = {
        'project' :  args.wandb_project,        
        'config' : args.__dict__,
        'group' : args.wandb_group,
-       'name' : args.wandb_name
+       'name' : args.wandb_name,
+       'config': {
+            'slurm_job_id' : os.getenv('SLURM_JOB_ID'),
+            'gpu_name' : gpu_properties.name,
+            'gpu_memory' : gpu_properties.total_memory
+        }
     }
     wandb.init(**kwargs)
 
@@ -398,7 +420,7 @@ if __name__ == "__main__":
     step = start_step
 
 
-    regenerate_Q2 = False
+    regenerate_Q2 = True
     if regenerate_Q2:
         print('Training an Adult Q2 CNN Network')
         step = start_step
@@ -463,13 +485,12 @@ if __name__ == "__main__":
 
                 epsilon = torch.rand(BATCH_SIZE, 1, 1).repeat(1, 1, SLICE_LEN).to(device)
                 
-                c = torch.nn.functional.one_hot(torch.randint(0, NUM_CATEG, (BATCH_SIZE,)),
-                                                        num_classes=NUM_CATEG).to(device)
+                c = get_architecture_appropriate_c(ARCHITECTURE, NUM_CATEG, BATCH_SIZE)
                 zeros = torch.zeros([BATCH_SIZE,1], device = device)
                 _z = torch.FloatTensor(BATCH_SIZE, 100 - (NUM_CATEG + 1)).uniform_(-1, 1).to(device)
                 z = torch.cat((c, zeros, _z), dim=1)
                 fakes = G(z)
-
+             
                 # shuffle the reals so that the matched item for discrim is not necessarily from the same referent                
                 shuffled_reals = reals[torch.randperm(reals.shape[0]),:,:]
                 
@@ -484,15 +505,13 @@ if __name__ == "__main__":
                 optimizer_D.zero_grad()
 
                 if i % WAVEGAN_DISC_NUPDATES == 0:
-                    optimizer_G.zero_grad()
-                                                                
+                    optimizer_G.zero_grad()                              
                     
                     if label_stages:
                         print('D -> G  update')
 
 
-                    c = torch.nn.functional.one_hot(torch.randint(0, NUM_CATEG, (BATCH_SIZE,)),
-                            num_classes=NUM_CATEG).to(device)
+                    c = get_architecture_appropriate_c(ARCHITECTURE, NUM_CATEG, BATCH_SIZE)
                     _z = torch.FloatTensor(BATCH_SIZE, 100 - (NUM_CATEG + 1)).uniform_(-1, 1).to(device)
                     zeros = torch.zeros([BATCH_SIZE,1], device = device)
                     z = torch.cat((c, zeros, _z), dim=1)
@@ -571,7 +590,7 @@ if __name__ == "__main__":
                         print('Recognizing G output with Q2 model...')                        
                         Q2_probs = Q2_cnn(selected_candidate_wavs.unsqueeze(1), Q2) 
 
-                        indices_of_recognized_words, Q2_probs_with_unks  = train_utimark_unks_in_Q2(Q2_probs, Q2_ENTROPY_THRESHOLD, device)
+                        indices_of_recognized_words, Q2_probs_with_unks  = mark_unks_in_Q2(Q2_probs, Q2_ENTROPY_THRESHOLD, device)
 
                         print('Finished marking unks')
                         print(indices_of_recognized_words)

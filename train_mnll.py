@@ -12,11 +12,10 @@ import torch.nn as nn
 from scipy.io.wavfile import read, write
 import scipy.stats
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from infowavegan import WaveGANGenerator, WaveGANDiscriminator, WaveGANQNetwork
-from utils import get_continuation_fname
+
 import tempfile
 import scipy
 import uuid
@@ -93,6 +92,15 @@ class AudioDataSet:
     def __len__(self):
         return self.len
 
+def get_architecture_appropriate_c(architecture, num_categ, batch_size):
+    if ARCHITECTURE == 'ciwgan':
+        c = torch.nn.functional.one_hot(torch.randint(0, num_categ, (batch_size,)),
+                                                num_classes=num_categ).to(device)
+    elif ARCHITECTURE == 'fiwgan':
+        c = torch.FloatTensor(batch_size, num_categ).bernoulli_().to(device)
+    else:
+        assert False, "Architecture not recognized."
+    return c
 
 def gradient_penalty(G, D, reals, fakes, epsilon):
     x_hat = epsilon * reals + (1 - epsilon) * fakes
@@ -111,17 +119,17 @@ def gradient_penalty(G, D, reals, fakes, epsilon):
 
 def Q2_cnn(selected_candidate_wavs, Q2, architecture):
     print('in Q2_cnn')
-    if architecture == "ciwgan":
+    if ARCHITECTURE == "ciwgan":
         Q2_probs = torch.softmax(Q2(selected_candidate_wavs), dim=1)
         # add a column for UNKs
         zeros = torch.zeros([Q2_probs.shape[0],1], device = device) + .00000001
         Q_network_probs_with_unk = torch.hstack((Q2_probs, zeros))
         #indices_of_recognized_words = range(Q_network_probs_with_unk.shape[0])
         return(Q_network_probs_with_unk)
-    elif architecture == "eiwgan":
+    elif ARCHITECTURE == "eiwgan":
         # this directly returns the embeddings (of the dimensionsionality NUM_DIMS)
         return(Q2(selected_candidate_wavs))
-    elif architecture == "fiwgan":
+    elif ARCHITECTURE == "fiwgan":
         raise NotImplementedError
     else:
         raise ValueError('architecture for Q2_cnn must be one of (ciwgan, eiwgan, fiwgan)')
@@ -196,13 +204,13 @@ if __name__ == "__main__":
         '--architecture',
         type=str,
         required=True,
-        help='Architecure. Can be ciwgan for fiwgan (fiwgan is not implemented yet)'
+        help='Architecure. Can be ciwgan for fiwgan'
     )
     parser.add_argument(
         '--log_dir',
         type=str,
         required=True,
-        help='Log/Results Directory. Results will be stored by wandb_group / wandb_id / epoch (see below)'
+        help='Log/Results Directory. Results will be stored by wandb_group / wandb_name / wandb_id (see below)'
     )
 
     parser.add_argument(
@@ -235,14 +243,6 @@ if __name__ == "__main__":
         type=int,
         default=64,
         help='Batch size'
-    )
-    parser.add_argument(
-        '--cont',
-        type=str,
-        default="",
-        help='''continue: default from the last saved iteration. '''
-             '''Provide the epoch number if you wish to resume from a specific point'''
-             '''Or set "last" to continue from last available'''
     )
 
     parser.add_argument(
@@ -285,13 +285,6 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        '--keep_intermediate_epochs',
-        action='store_true',
-        help='Keep previous checkpoints after a new one is saved?',
-        default=False
-    )
-
-    parser.add_argument(
         '--wandb_project',
         type=str,
         help='Name of the project for tracking in Weights and Biases',        
@@ -304,9 +297,9 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        '--wandb_id',
+        '--wandb_name',
         type=str,
-        help='Name of this specific run (distinguishing it from others in the group)',        
+        help='Name of this specific run',        
     )
 
     parser.add_argument(
@@ -351,20 +344,25 @@ if __name__ == "__main__":
         default = 6
     )
 
+    parser.add_argument(
+        '--q2_q_noise_probability',
+        type=float,
+        help="Probability that the action taken by Q2 is affected by noise and does not match Q's referent",
+        default=0
+    )
+
     args = parser.parse_args()
     train_Q = True
     track_Q2 = bool(args.track_q2)
-    architecture = args.architecture
-    if architecture  == 'fiwgan':
-        raise ValueError('Untested -- what happens with the feature representations')
     if track_Q2:        
         vocab = args.vocab.split(' ')+['UNK']
 
+    ARCHITECTURE = args.architecture
+    
     # Parameters
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     datadir = args.data_dir
-    logdir = os.path.join(args.log_dir, args.wandb_group, args.wandb_id)
-    
+
     # Epochs and Intervals
     NUM_EPOCHS = args.num_epochs
     WAVEGAN_DISC_NUPDATES = args.wavegan_disc_nupdates
@@ -394,17 +392,26 @@ if __name__ == "__main__":
     NUM_Q2_TRAINING_EPOCHS = args.num_q2_training_epochs
     Q2_BATCH_SIZE = args.q2_batch_size
     Q2_ENTROPY_THRESHOLD = args.q2_entropy_threshold
+   
+    gpu_properties = torch.cuda.get_device_properties('cuda')
+    kwargs = {
+       'project' :  args.wandb_project,        
+       'config' : args.__dict__,
+       'group' : args.wandb_group,
+       'name' : args.wandb_name,
+       'config': {
+            'slurm_job_id' : os.getenv('SLURM_JOB_ID'),
+            'gpu_name' : gpu_properties.name,
+            'gpu_memory' : gpu_properties.total_memory
+        }
+    }
+    wandb.init(**kwargs)
 
-    CONT = args.cont    
+    logdir = os.path.join(args.log_dir, args.wandb_group, args.wandb_name, wandb.run.id)
+    if not os.path.exists(logdir):
+        os.makedirs(logdir)
 
-    wandb.init(        
-        project=args.wandb_project,        
-        config=args.__dict__,
-        group=args.wandb_group,
-        id = args.wandb_id
-    )
-
-    if architecture == "eiwgan":
+    if ARCHITECTURE == "eiwgan":
         if NUM_CATEG != 4:
             raise ValueError('NUM_CATEG must be 4 for hard-coded word means in Eiwgan. Make this variable later.')
         word_means = [[-.5,-.5],[-.5,.5],[.5,-.5],[.5,.5]]
@@ -461,22 +468,22 @@ if __name__ == "__main__":
 
 
         if track_Q2:
-            if architecture in ("ciwgan","fiwgan"):
+            if ARCHITECTURE in ("ciwgan","fiwgan"):
                 Q2 = WaveGANQNetwork(slice_len=SLICE_LEN, num_categ=NUM_CATEG).to(device).train()
-            elif architecture == "eiwgan":
+            elif ARCHITECTURE == "eiwgan":
                 Q2 = WaveGANQNetwork(slice_len=SLICE_LEN, num_categ=NUM_DIM).to(device).train()
             
 
             optimizer_Q2_to_QG = optim.RMSprop(it.chain(G.parameters(), Q.parameters()), lr=LEARNING_RATE)
             optimizer_Q2_to_Q2 = optim.RMSprop(Q2.parameters(), lr=LEARNING_RATE)
             
-            if args.architecture == 'fiwgan':
+            if ARCHITECTURE == 'fiwgan':
                 criterion_Q = torch.nn.BCEWithLogitsLoss() # binary cross entropy
 
-            elif architecture == "eiwgan":
+            elif ARCHITECTURE == "eiwgan":
                 criterion_Q2 = EuclideanLoss()            
             
-            elif architecture == "ciwgan":
+            elif ARCHITECTURE == "ciwgan":
                 criterion_Q2 = lambda inpt, target: torch.nn.CrossEntropyLoss()(inpt, target.max(dim=1)[1])
 
             else:
@@ -491,38 +498,9 @@ if __name__ == "__main__":
     start_epoch = 0
     start_step = 0
 
-    if str(CONT).lower() != "":
-        
-        try:
-            print("Loading model from existing checkpoints...")
-            fname, start_epoch = get_continuation_fname(CONT, logdir)
+    print("Starting a new training")
 
-            G.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_G.pt")))
-            D.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_D.pt")))
-            if train_Q:
-                Q.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Q.pt")))
-                # there is no change over time to the Q2 network
 
-            optimizer_G.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Gopt.pt")))
-            optimizer_D.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Dopt.pt")))
-
-            if train_Q:
-                optimizer_Q_to_G.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Q_to_Gopt.pt")))
-                optimizer_Q_to_Q.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Q_to_Qopt.pt")))
-                optimizer_Q2_to_Q.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Q2_to_Qopt.pt")))
-                Q2.load_state_dict(torch.load(f=os.path.join(logdir, fname + "_Q2.pt")))
-
-            start_step = int(re.search(r'_step(\d+).*', fname).group(1))
-            print(f"Successfully loaded model. Continuing training from epoch {start_epoch},"
-                  f" step {start_step}")
-        except:
-            "Problem loading existing model!"
-        
-    else:
-        print("Starting a new training")
-
-    # Set Up Writer
-    writer = SummaryWriter(logdir)
     step = start_step
 
 
@@ -537,26 +515,27 @@ if __name__ == "__main__":
             pbar = tqdm(dataloader)            
             for i, trial in enumerate(pbar):            
                 reals = trial[0].to(device)
-                labels = trial[1].to(device)        
-                continuous_labels = trial[2].to(device)
+                labels = trial[1].to(device)  
+                if ARCHITECTURE == 'eiwgan':  
+                    continuous_labels = trial[2].to(device)
                 optimizer_Q2_to_Q2.zero_grad()
                 Q2_logits = Q2(reals)    
                 
-                if architecture in ("ciwgan", "fiwgan"):
+                if ARCHITECTURE in ("ciwgan", "fiwgan"):
                     Q2_comprehension_loss = criterion_Q(Q2_logits, labels[:,0:NUM_CATEG]) # Note we exclude the UNK label --  child never intends to produce unk
-                elif architecture == "eiwgan":                    
+                elif ARCHITECTURE == "eiwgan":                    
                     Q2_comprehension_loss = torch.mean(criterion_Q(Q2_logits, continuous_labels))
 
                 Q2_comprehension_loss.backward()
-                writer.add_scalar('Loss/Q2 to Q2', Q2_comprehension_loss.detach().item(), step)
+
                 wandb.log({"Loss/Q2 to Q2": Q2_comprehension_loss.detach().item()}, step=step)
                 optimizer_Q2_to_Q2.step()
                 step += 1
-        torch.save(Q2, 'saved_networks/adult_pretrained_Q_network_'+str(NUM_CATEG)+'_'+architecture+'.torch')
+        torch.save(Q2, 'saved_networks/adult_pretrained_Q_network_'+str(NUM_CATEG)+'_'+ARCHITECTURE+'.torch')
 
     else:
         print('Loading a Previous Adult Q2 CNN Network')
-        Q2 = torch.load('saved_networks/adult_pretrained_Q_network_'+str(NUM_CATEG)+'_'+architecture+'.torch')
+        Q2 = torch.load('saved_networks/adult_pretrained_Q_network_'+str(NUM_CATEG)+'_'+ARCHITECTURE+'.torch')
 
     # freeze it
     Q2.eval()        
@@ -575,10 +554,10 @@ if __name__ == "__main__":
             
             reals = trial[0].to(device)
             labels = trial[1].to(device)
-
+           
             if (epoch <= PRODUCTION_START_EPOCH) or (epoch % COMPREHENSION_INTERVAL == 0):
                 # Just train the Q network from external data
-                if architecture == 'eiwgan':
+                if ARCHITECTURE == 'eiwgan':
                     raise NotImplementedError
                 
                 if label_stages:
@@ -588,7 +567,6 @@ if __name__ == "__main__":
                 child_recovers_from_adult = Q(reals)    
                 Q_comprehension_loss = criterion_Q(child_recovers_from_adult, labels[:,0:NUM_CATEG]) # Note we exclude the UNK label --  child never intends to produce unk
                 Q_comprehension_loss.backward()
-                writer.add_scalar('Loss/Q to Q', Q_comprehension_loss.detach().item(), step)
                 wandb.log({"Loss/Q to Q": Q_comprehension_loss.detach().item()}, step=step)
                 optimizer_Q_to_Q.step()
                 step += 1
@@ -600,13 +578,7 @@ if __name__ == "__main__":
 
                 epsilon = torch.rand(BATCH_SIZE, 1, 1).repeat(1, 1, SLICE_LEN).to(device)
                 
-                if architecture == "ciwgan":
-                    c = torch.nn.functional.one_hot(torch.randint(0, NUM_CATEG, (BATCH_SIZE,)),
-                                                         num_classes=NUM_CATEG).to(device)
-                    zeros = torch.zeros([BATCH_SIZE,1], device = device)
-                    _z = torch.FloatTensor(BATCH_SIZE, 100 - (NUM_CATEG + 1)).uniform_(-1, 1).to(device)
-                    z = torch.cat((c, zeros, _z), dim=1)
-                elif architecture == "eiwgan":
+                if ARCHITECTURE == "eiwgan":
                     # draw from the semantic space a c that will need to be encoded
                 
                     words = torch.nn.functional.one_hot(torch.randint(0, NUM_CATEG, (BATCH_SIZE,)),
@@ -624,14 +596,19 @@ if __name__ == "__main__":
                     _z = torch.FloatTensor(BATCH_SIZE, 100 - NUM_DIM).uniform_(-1, 1).to(device)                    
                     z = torch.cat((c, _z), dim=1)
 
+                elif ARCHITECTURE in {'ciwgan', 'fiwgan'}: 
+                    c = get_architecture_appropriate_c(ARCHITECTURE, NUM_CATEG, BATCH_SIZE)
+                    zeros = torch.zeros([BATCH_SIZE,1], device = device)
+                    _z = torch.FloatTensor(BATCH_SIZE, 100 - (NUM_CATEG + 1)).uniform_(-1, 1).to(device)
+                    z = torch.cat((c, zeros, _z), dim=1)
                 fakes = G(z)
-
+             
                 # shuffle the reals so that the matched item for discrim is not necessarily from the same referent                
                 shuffled_reals = reals[torch.randperm(reals.shape[0]),:,:]
                 
                 penalty = gradient_penalty(G, D, shuffled_reals, fakes, epsilon)
                 D_loss = torch.mean(D(fakes) - D(shuffled_reals) + LAMBDA * penalty)
-                writer.add_scalar('Loss/D', D_loss.detach().item(), step)
+                
                 wandb.log({"Loss/D": D_loss.detach().item()}, step=step)
                 D_loss.backward()
                 if label_stages:
@@ -640,20 +617,12 @@ if __name__ == "__main__":
                 optimizer_D.zero_grad()
 
                 if i % WAVEGAN_DISC_NUPDATES == 0:
-                    optimizer_G.zero_grad()
-                                                                
+                    optimizer_G.zero_grad()                              
                     
                     if label_stages:
                         print('D -> G  update')
-
-                    if architecture == "ciwgan":
-                        c = torch.nn.functional.one_hot(torch.randint(0, NUM_CATEG, (BATCH_SIZE,)),
-                             num_classes=NUM_CATEG).to(device)
-                        _z = torch.FloatTensor(BATCH_SIZE, 100 - (NUM_CATEG + 1)).uniform_(-1, 1).to(device)
-                        zeros = torch.zeros([BATCH_SIZE,1], device = device)
-                        z = torch.cat((c, zeros, _z), dim=1)
                     
-                    elif architecture == "eiwgan":
+                    if ARCHITECTURE == "eiwgan":
                         # draw from the semantic space a c that will need to be encoded
                 
                         words = torch.nn.functional.one_hot(torch.randint(0, NUM_CATEG, (BATCH_SIZE,)),
@@ -670,6 +639,11 @@ if __name__ == "__main__":
                         c =  torch.from_numpy(np.vstack([sem_vector_store[i][j,:] for i,j in zip(word_indices, range(BATCH_SIZE))]).astype(np.float32)).to(device)                         
                         _z = torch.FloatTensor(BATCH_SIZE, 100 - NUM_DIM).uniform_(-1, 1).to(device)                    
                         z = torch.cat((c, _z), dim=1)
+                    elif ARCHITECTURE in {'ciwgan', 'fiwgan'}:
+                        c = get_architecture_appropriate_c(ARCHITECTURE, NUM_CATEG, BATCH_SIZE)
+                        _z = torch.FloatTensor(BATCH_SIZE, 100 - (NUM_CATEG + 1)).uniform_(-1, 1).to(device)
+                        zeros = torch.zeros([BATCH_SIZE,1], device = device)
+                        z = torch.cat((c, zeros, _z), dim=1)
 
                     G_z_for_G_update = G(z) # generate again using the same labels
 
@@ -681,14 +655,14 @@ if __name__ == "__main__":
                     optimizer_G.zero_grad()
                     if label_stages:
                         print('Generator update!')
-                    writer.add_scalar('Loss/G', G_loss.detach().item(), step)
                     wandb.log({"Loss/G": G_loss.detach().item()}, step=step)
 
 
                     if (epoch % WAV_OUTPUT_N == 0) & (i <= 1):
-                         
+                        
                         print('Sampling .wav outputs (but not running them through Q2)...')
-                        write_out_wavs(G_z_for_G_update, torch.from_numpy(words).to(device), vocab, logdir, epoch)                        
+                        as_words = torch.from_numpy(words).to(device) if ARCHITECTURE == 'eiwgan' else c
+                        write_out_wavs(G_z_for_G_update, as_words, vocab, logdir, epoch)                        
                         # but don't do anything with it; just let it write out all of the audio files
                 
                     # Q2 Loss: Update G and Q to better imitate the Q2 model
@@ -696,7 +670,6 @@ if __name__ == "__main__":
                         
                         if label_stages:
                             print('Starting Q2 evaluation...')                        
-
 
                         optimizer_Q2_to_QG.zero_grad() # clear the gradients for the Q update
 
@@ -706,7 +679,7 @@ if __name__ == "__main__":
 
                         print('Choosing '+str(Q2_BATCH_SIZE)+' best candidates for each word...')
 
-                        if architecture == 'ciwgan':
+                        if ARCHITECTURE == 'ciwgan':
 
                             selected_referents = []
                             for categ_index in range(NUM_CATEG):
@@ -745,7 +718,7 @@ if __name__ == "__main__":
                             selected_referents =  torch.vstack(selected_referents)
                             selected_Q_estimates = torch.vstack(selected_Q_estimates)  
 
-                        elif architecture == 'eiwgan':                            
+                        elif ARCHITECTURE == 'eiwgan':                            
                             
                             selected_meanings = []
                             selected_referents = []
@@ -799,8 +772,8 @@ if __name__ == "__main__":
                             selected_Q_estimates = torch.vstack(selected_Q_estimates)  
 
                         print('Recognizing G output with Q2 model...')                        
-                        if architecture == "ciwgan":
-                            Q2_probs = Q2_cnn(selected_candidate_wavs.unsqueeze(1), Q2, architecture) 
+                        if ARCHITECTURE == "ciwgan":
+                            Q2_probs = Q2_cnn(selected_candidate_wavs.unsqueeze(1), Q2, ARCHITECTURE) 
                             
                             indices_of_recognized_words, Q2_probs_with_unks  = mark_unks_in_Q2(Q2_probs, Q2_ENTROPY_THRESHOLD, device)
                             print('Finished marking unks')
@@ -810,9 +783,9 @@ if __name__ == "__main__":
                             total_recognized_words = len(indices_of_recognized_words)
                             print('Word recognition complete. Found '+str(len(indices_of_recognized_words))+' of '+str(Q2_BATCH_SIZE*NUM_CATEG)+' words')
 
-                        elif architecture == "eiwgan":
+                        elif ARCHITECTURE == "eiwgan":
 
-                            Q2_sem_vecs = Q2_cnn(selected_candidate_wavs.unsqueeze(1), Q2, architecture) 
+                            Q2_sem_vecs = Q2_cnn(selected_candidate_wavs.unsqueeze(1), Q2, ARCHITECTURE) 
                             # First version of EIWGAN does not have entropy filtering, so all words are recognized
                             indices_of_recognized_words = torch.arange(start=0, end=selected_candidate_wavs.shape[0]).to(device)
 
@@ -832,7 +805,7 @@ if __name__ == "__main__":
                             # this is a one shot game for each reference, so implicitly the value before taking the action is 0. I might update this later, i.e., think about this in terms of sequences                   
                                                     
                             # compute the cross entropy between the Q network and the Q2 outputs, which are class labels recovered by the adults                                                    
-                            if architecture == 'ciwgan':    
+                            if ARCHITECTURE == 'ciwgan':    
                                 augmented_Q_prediction = torch.log(torch.hstack((Q_prediction, zero_tensor)) + .0000001)                            
 
                                 # is the Q prediction the same as selected_referents?                            
@@ -846,7 +819,7 @@ if __name__ == "__main__":
                                 Q_recovers_Q2 = torch.eq(torch.argmax(augmented_Q_prediction[indices_of_recognized_words], dim=1), torch.argmax(Q2_probs_with_unks[indices_of_recognized_words], dim=1)).cpu().numpy().tolist()
                                 Q2_recovers_child = torch.eq(torch.argmax(selected_referents[indices_of_recognized_words], dim=1), torch.argmax(Q2_probs_with_unks[indices_of_recognized_words], dim=1)).cpu().numpy().tolist()
                             
-                            elif architecture  == 'eiwgan':                                    
+                            elif ARCHITECTURE == 'eiwgan':                                    
                                 Q2_loss = torch.mean(criterion_Q2(Q_prediction[indices_of_recognized_words], Q2_sem_vecs[indices_of_recognized_words]))                                
 
                                 print('Check if we recover the one-hot that was used to draw the continuously valued vector')                                
@@ -872,50 +845,46 @@ if __name__ == "__main__":
                                 optimizer_Q2_to_QG.step()
                             optimizer_Q2_to_QG.zero_grad()
 
-                            if architecture in ('eiwgan','ciwgan'):
+                            if ARCHITECTURE in ('eiwgan','ciwgan'):
                                 total_Q2_recovers_child = np.sum(Q2_recovers_child)
 
-                            if architecture  == 'ciwgan':
+                            if ARCHITECTURE  == 'ciwgan':
                                 total_Q_recovers_Q2 = np.sum(Q_recovers_Q2)                                                            
 
-                            writer.add_scalar('Loss/Q2 to Q', Q2_loss.detach().item(), step)
                             wandb.log({"Loss/Q2 to Q": Q2_loss.detach().item()}, step=step)
 
                         else:                            
-                            if architecture in ('eiwgan','ciwgan'):
+                            if ARCHITECTURE in ('eiwgan','ciwgan'):
                                 total_Q2_recovers_child = 0
-                            if architecture  == 'ciwgan':
+                            if ARCHITECTURE  == 'ciwgan':
                                 total_Q_recovers_Q2 = 0
 
-                        if architecture in ('ciwgan','eiwgan'):
+                        if ARCHITECTURE in ('ciwgan','eiwgan'):
 
                             # How often does the Q2 nework get back the right referent
-                            writer.add_scalar('Metric/Number of Referents Recovered by Q2', total_Q2_recovers_child, step)
                             wandb.log({"Metric/Number of Referents Recovered by Q2": total_Q2_recovers_child}, step=step)
 
-                            # Among those assigned a referent, how often does that agree with what the child intended
-                            #writer.add_scalar('Metric/Proportion that Q recovers from Q2 recognized', total_Q_recovers_Q2 / total_recognized_words, step)
-
-                        if architecture  == 'ciwgan':
+                        if ARCHITECTURE  == 'ciwgan':
                             # How often does the Q network repliacte the Q2 network
-                            writer.add_scalar('Metric/Number of Q2 references replicated by Q', total_Q_recovers_Q2, step)
+                           
                             wandb.log({"Metric/Number of Q2 references replicated by Q": total_Q_recovers_Q2}, step=step)
 
                             # proportion of words that Q2 assigns a referent to (ie, what proportion are not unknown)
-                            writer.add_scalar('Metric/Proportion Recognized Words Among Total', total_recognized_words / (Q2_BATCH_SIZE *NUM_CATEG), step)
+
                             wandb.log({"Metric/Proportion Recognized Words Among Total": total_recognized_words / (Q2_BATCH_SIZE *NUM_CATEG)}, step=step)                        
                         
+                   
                     if label_stages:
                         print('Q -> G, Q update')
 
-                    if architecture == "ciwgan":
+                    if ARCHITECTURE == "ciwgan":
                         c = torch.nn.functional.one_hot(torch.randint(0, NUM_CATEG, (BATCH_SIZE,)),
                              num_classes=NUM_CATEG).to(device)
                         _z = torch.FloatTensor(BATCH_SIZE, 100 - (NUM_CATEG + 1)).uniform_(-1, 1).to(device)
                         zeros = torch.zeros([BATCH_SIZE,1], device = device)
                         z = torch.cat((c, zeros, _z), dim=1)
                     
-                    elif architecture == "eiwgan":
+                    elif ARCHITECTURE == "eiwgan":
                         # draw from the semantic space a c that will need to be encoded
                 
                         words = torch.nn.functional.one_hot(torch.randint(0, NUM_CATEG, (BATCH_SIZE,)),
@@ -936,26 +905,23 @@ if __name__ == "__main__":
                     G_z_for_Q_update = G(z) # generate again using the same labels
 
                     optimizer_Q_to_QG.zero_grad()
-                    if architecture == "eiwgan":
+                    if ARCHITECTURE == "eiwgan":
                         
                         Q_production_loss = torch.mean(criterion_Q(Q(G_z_for_Q_update), c))
                         # distance in the semantic space between what the child expects the adult to revover and what the child actually does
 
-                    elif architecture == "ciwgan":
+                    elif ARCHITECTURE == "ciwgan":
                                                 
                         Q_production_loss = criterion_Q(Q(G_z_for_Q_update), c[:,0:NUM_CATEG]) # Note we exclude the UNK label --  child never intends to produce unk
 
                     Q_production_loss.backward()
-                    writer.add_scalar('Loss/Q to G', Q_production_loss.detach().item(), step)
                     wandb.log({"Loss/Q to G": Q_production_loss.detach().item()}, step=step)
                     optimizer_Q_to_QG.step()
                     optimizer_Q_to_QG.zero_grad()
 
-                    
                 step += 1
 
         if epoch % SAVE_INT == 0:
-
             if G is not None:
                 torch.save(G.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_G.pt'))
             if D is not None:
@@ -970,14 +936,10 @@ if __name__ == "__main__":
                 torch.save(optimizer_D.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_Dopt.pt'))
             if train_Q:
                 torch.save(optimizer_Q_to_QG.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_Q_to_Gopt.pt'))            
-            if track_Q2 and optimizer_Q2_to_QG is not None:
+            if train_Q and track_Q2 and optimizer_Q2_to_QG is not None:
                 torch.save(optimizer_Q2_to_QG.state_dict(), os.path.join(logdir, f'epoch{epoch}_step{step}_Q_to_Q2opt.pt'))
-            
 
-            if args.keep_intermediate_epochs:
-                pass
-            else:
-                if ('last_path_prefix' in locals()) or ('last_path_prefix' in globals()):
-                    os.system('rm '+last_path_prefix)
+            if ('last_path_prefix' in locals()) or ('last_path_prefix' in globals()):
+                os.system('rm '+last_path_prefix)
 
             last_path_prefix = os.path.join(logdir, 'epoch'+str(epoch)+'_step'+str(step)+'*')

@@ -478,7 +478,7 @@ if __name__ == "__main__":
             optimizer_Q2_to_Q2 = optim.RMSprop(Q2.parameters(), lr=LEARNING_RATE)
             
             if ARCHITECTURE == 'fiwgan':
-                criterion_Q = torch.nn.BCEWithLogitsLoss() # binary cross entropy
+                criterion_Q2 = torch.nn.BCEWithLogitsLoss() # binary cross entropy
 
             elif ARCHITECTURE == "eiwgan":
                 criterion_Q2 = EuclideanLoss()            
@@ -910,7 +910,7 @@ if __name__ == "__main__":
                         Q_production_loss = torch.mean(criterion_Q(Q(G_z_for_Q_update), c))
                         # distance in the semantic space between what the child expects the adult to revover and what the child actually does
 
-                    elif ARCHITECTURE == "ciwgan":
+                    elif ARCHITECTURE in {"ciwgan", "fiwgan"}:
                                                 
                         Q_production_loss = criterion_Q(Q(G_z_for_Q_update), c[:,0:NUM_CATEG]) # Note we exclude the UNK label --  child never intends to produce unk
 

@@ -130,7 +130,7 @@ def Q2_cnn(selected_candidate_wavs, Q2, architecture):
         raise ValueError('architecture for Q2_cnn must be one of (ciwgan, eiwgan, fiwgan)')
 
 
-def write_out_wavs(G_z_2d, labels, vocab, logdir, epoch):
+def write_out_wavs(architecture, G_z_2d, labels, vocab, logdir, epoch):
     # returns probabilities and a set of indices; takes a smaller number of arguments
     files_for_asr = []
     epoch_path = os.path.join(logdir,'audio_files',str(epoch))
@@ -140,8 +140,11 @@ def write_out_wavs(G_z_2d, labels, vocab, logdir, epoch):
     labels_local = labels.cpu().detach().numpy()
     # for each file in the batch, write out a wavfile
     for j in range(G_z_2d.shape[0]):
-        audio_buffer = G_z_2d[j,:].detach().cpu().numpy()          
-        true_word = vocab[np.argwhere(labels_local[j,:])[0][0]]
+        audio_buffer = G_z_2d[j,:].detach().cpu().numpy()
+        if architecture == 'ciwgan':
+            true_word = vocab[np.argwhere(labels_local[j,:])[0][0]]
+        else:
+            true_word = ''
         tf = os.path.join(epoch_path,true_word + '_' + str(uuid.uuid4())+".wav")
         write(tf, 16000, audio_buffer[0])
         files_for_asr.append(copy.copy(tf))
@@ -628,7 +631,7 @@ if __name__ == "__main__":
                         
                         print('Sampling .wav outputs (but not running them through Q2)...')
                         as_words = torch.from_numpy(words).to(device) if ARCHITECTURE == 'eiwgan' else c
-                        write_out_wavs(G_z_for_G_update, as_words, vocab, logdir, epoch)                        
+                        write_out_wavs(ARCHITECTURE, G_z_for_G_update, as_words, vocab, logdir, epoch)                        
                         # but don't do anything with it; just let it write out all of the audio files
                 
                     # Q2 Loss: Update G and Q to better imitate the Q2 model

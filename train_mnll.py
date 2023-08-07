@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.optim as optim
+import torch.nn.functional as F
 import torch.nn as nn
 from scipy.io.wavfile import read, write
 import scipy.stats
@@ -310,7 +311,7 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        '--q2_q_noise_probability',
+        '--q2_noise_probability',
         type=float,
         help="Probability that the action taken by Q2 is affected by noise and does not match Q's referent",
         default=0
@@ -322,6 +323,9 @@ if __name__ == "__main__":
     vocab = args.vocab.split()
 
     ARCHITECTURE = args.architecture
+    
+    if args.q2_noise_probability > 0:
+        assert ARCHITECTURE != 'eiwgan', "Eiwgan does not have noise probability support."
     
     # Parameters
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -635,8 +639,10 @@ if __name__ == "__main__":
 
                         optimizer_Q2_to_QG.zero_grad() # clear the gradients for the Q update
 
-                        selected_candidate_wavs = []                        
+                        selected_candidate_wavs = []  
+                        mixed_selected_candidate_wavs = []                      
                         selected_Q_estimates = []
+                        mixed_selected_Q_estimates = []
 
                         print('Choosing '+str(Q2_BATCH_SIZE)+' best candidates for each word...')
 
@@ -650,15 +656,34 @@ if __name__ == "__main__":
                             for categ_index in range(NUM_CATEG):
                                 
                                 num_candidates_to_consider_per_word = 1 # increasing this breaks stuff. Results in considering a larger space
+
+                                def mask_for_random_vectors(original_label, vocab_size, batch_size, q2_noise_probability):
+                                    # Get random vectors and prepare for mask
+                                    random_labels = torch.from_numpy(np.random.choice(np.arange(vocab_size), size = (batch_size,)))
+                                    mask_by_batch_dim = torch.from_numpy(np.random.choice([0, 1], size = (batch_size,), p = [1 - q2_noise_probability, q2_noise_probability]))
+                                    labels = torch.where(mask_by_batch_dim == 1, random_labels, original_label)
+                                    onehot_per_word = F.one_hot(labels, num_classes = vocab_size)    
+                                    assert len(onehot_per_word.shape) == 2
+                                    candidate_referents = onehot_per_word.unsqueeze(1).repeat((1, num_candidates_to_consider_per_word, 1)).reshape(-1, onehot_per_word.shape[-1])
+                                    return candidate_referents
+
                                 # generate a large numver of possible candidates
                                 candidate_referents = np.zeros([Q2_BATCH_SIZE*num_candidates_to_consider_per_word, NUM_CATEG], dtype=np.float32)
-                                candidate_referents[:,categ_index] = 1                            
+                                candidate_referents[:,categ_index] = 1     
                                 candidate_referents = torch.Tensor(candidate_referents).to(device)
                                 _z = torch.FloatTensor(Q2_BATCH_SIZE*num_candidates_to_consider_per_word, 100 - (NUM_CATEG)).uniform_(-1, 1).to(device)
+
+                                # possible candidated but mixed
+                                mixed_candidate_referents = mask_for_random_vectors(categ_index, len(vocab), Q2_BATCH_SIZE, args.q2_noise_probability).to(device)
 
                                 # generate new candidate wavs
                                 candidate_wavs = G(torch.cat((candidate_referents, _z), dim=1))
                                 candidate_Q_estimates = Q(candidate_wavs)
+
+                                # generate new mixed candidate wavs
+                                mixed_candidate_wavs = G(torch.cat((mixed_candidate_referents, _z), dim=1))
+                                mixed_candidate_Q_estimates = Q(mixed_candidate_wavs)
+
 
                                 # select the Q2_BATCH_SIZE items that are most likely to produce the correct response
                                 candidate_predicted_values = torch.Tensor([predicted_value_loss(candidate_Q_estimates[i], candidate_referents[i]) for i in range(candidate_referents.shape[0])])                                
@@ -670,6 +695,9 @@ if __name__ == "__main__":
                                 selected_referents.append(torch.narrow(candidate_referents[candidate_ordering,:], dim=0, start=0, length=Q2_BATCH_SIZE).clone())
                                 selected_Q_estimates.append(torch.narrow(candidate_Q_estimates[candidate_ordering,:], dim=0, start=0, length=Q2_BATCH_SIZE).clone())
 
+                                # select mixed candidates that correspond to that subset
+                                mixed_selected_candidate_wavs.append(torch.narrow(mixed_candidate_wavs[candidate_ordering,:], dim=0, start=0, length=Q2_BATCH_SIZE)[:,0].clone())
+                                mixed_selected_Q_estimates.append(torch.narrow(mixed_candidate_Q_estimates[candidate_ordering,:], dim=0, start=0, length=Q2_BATCH_SIZE).clone())
 
                                 del candidate_referents
                                 del candidate_wavs
@@ -683,6 +711,8 @@ if __name__ == "__main__":
                             selected_referents =  torch.vstack(selected_referents)
                             selected_Q_estimates = torch.vstack(selected_Q_estimates)  
 
+                            mixed_selected_candidate_wavs = torch.vstack(mixed_selected_candidate_wavs)
+                            mixed_selected_Q_estimates = torch.vstack(mixed_selected_Q_estimates)
                         elif ARCHITECTURE == 'eiwgan':                            
                             
                             selected_meanings = []
@@ -738,8 +768,9 @@ if __name__ == "__main__":
 
                         print('Recognizing G output with Q2 model...')                        
                         if ARCHITECTURE in {"ciwgan", "fiwgan"}:
-                            Q2_probs = Q2_cnn(selected_candidate_wavs.unsqueeze(1), Q2, ARCHITECTURE) 
-             
+                            with torch.no_grad():
+                                Q2_probs = Q2_cnn(selected_candidate_wavs.unsqueeze(1), Q2, ARCHITECTURE)
+                            mixed_Q2_probs = Q2_cnn(mixed_selected_candidate_wavs.unsqueeze(1), Q2, ARCHITECTURE)
                         elif ARCHITECTURE == "eiwgan":
 
                             Q2_sem_vecs = Q2_cnn(selected_candidate_wavs.unsqueeze(1), Q2, ARCHITECTURE) 
@@ -752,14 +783,19 @@ if __name__ == "__main__":
                         # Q_of_selected_candidates is the expected value of each utterance
 
                         Q_prediction = torch.softmax(selected_Q_estimates, dim=1)
+                        if ARCHITECTURE in ('ciwgan', 'fiwgan'):
+                            mixed_Q_prediction = torch.softmax(mixed_selected_Q_estimates, dim=1)
                                 
                         # this is a one shot game for each reference, so implicitly the value before taking the action is 0. I might update this later, i.e., think about this in terms of sequences                   
                                                 
                         # compute the cross entropy between the Q network and the Q2 outputs, which are class labels recovered by the adults                                                    
                         if ARCHITECTURE in {'ciwgan', 'fiwgan'}:    
-                            augmented_Q_prediction = torch.log(Q_prediction + .0000001)                            
-
-                            Q2_loss = criterion_Q2(augmented_Q_prediction, Q2_probs)   
+                            augmented_Q_prediction = torch.log(Q_prediction + .0000001)   
+                            mixed_augmented_Q_prediction = torch.log(mixed_Q_prediction + .0000001)                          
+                            
+                            mixed_Q2_loss = criterion_Q2(mixed_augmented_Q_prediction, mixed_Q2_probs)   
+                            with torch.no_grad():
+                                Q2_loss = criterion_Q2(augmented_Q_prediction, Q2_probs)   
 
                             if ARCHITECTURE == 'ciwgan':
                                 # is the Q prediction the same as selected_referents?                            
@@ -793,7 +829,12 @@ if __name__ == "__main__":
                                                                                                                 
                         #this is where we would compute the loss
                         if args.backprop_from_Q2:
-                            Q2_loss.backward(retain_graph=True)
+                            if ARCHITECTURE in ('ciwgan', 'fiwgan'):
+                                mixed_Q2_loss.backward(retain_graph=True)
+                            elif ARCHITECTURE == 'eiwgan':
+                                Q2_loss.backward(retain_graph=True)
+                            else:
+                                raise NotImplementedError
                         else:
                             print('Computing Q2 network loss but not backpropagating...')
                             

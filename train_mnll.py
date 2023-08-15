@@ -824,7 +824,17 @@ if __name__ == "__main__":
                                 Q_recovers_Q2 = count_binary_vector_matches(augmented_Q_prediction, Q2_probs)
                                 Q2_recovers_child = count_binary_vector_matches(selected_referents, Q2_probs)
                         
-                        elif ARCHITECTURE == 'eiwgan':                                    
+                        elif ARCHITECTURE == 'eiwgan':                                                            
+
+                            embeddings_path = os.path.join(logdir,'meaning_embeddings')
+                            if not os.path.exists(embeddings_path):
+                                os.makedirs(embeddings_path)
+
+                            #'Write out the initial vectors, the Q predictions, and the Q2 interpretations
+                            pd.DataFrame(selected_meanings.detach().cpu().numpy()).to_csv(os.path.join(embeddings_path,str(epoch)+'_selected_meaning.csv'))
+                            pd.DataFrame(Q_prediction.detach().cpu().numpy()).to_csv(os.path.join(embeddings_path,str(epoch)+'_Q_prediction.csv'))
+                            pd.DataFrame(Q2_sem_vecs.detach().cpu().numpy()).to_csv(os.path.join(embeddings_path,str(epoch)+'_Q2_sem_vecs.csv'))
+
                             Q2_loss = torch.mean(criterion_Q2(Q_prediction, Q2_sem_vecs))                                
 
                             print('Check if we recover the one-hot that was used to draw the continuously valued vector')                                

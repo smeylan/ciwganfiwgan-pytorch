@@ -774,9 +774,13 @@ if __name__ == "__main__":
                             with torch.no_grad():
                                 Q2_probs = Q2_cnn(selected_candidate_wavs.unsqueeze(1), Q2, ARCHITECTURE)
                             mixed_Q2_probs = Q2_cnn(mixed_selected_candidate_wavs.unsqueeze(1), Q2, ARCHITECTURE)
+                            Q_prediction = torch.softmax(selected_Q_estimates, dim=1)
+
+
                         elif ARCHITECTURE == "eiwgan":
 
                             Q2_sem_vecs = Q2_cnn(selected_candidate_wavs.unsqueeze(1), Q2, ARCHITECTURE) 
+                            Q_prediction = selected_Q_estimates
                             
                         #assert(Q2_probs.shape[1] == NUM_CATEG+1)
                         
@@ -784,8 +788,8 @@ if __name__ == "__main__":
                         #Q2_output = torch.from_numpy(Q2_probs.astype(np.float32)).to(device) 
 
                         # Q_of_selected_candidates is the expected value of each utterance
+                    
 
-                        Q_prediction = torch.softmax(selected_Q_estimates, dim=1)
                         if ARCHITECTURE in ('ciwgan', 'fiwgan'):
                             mixed_Q_prediction = torch.softmax(mixed_selected_Q_estimates, dim=1)
                                 
@@ -836,7 +840,6 @@ if __name__ == "__main__":
                             pd.DataFrame(Q2_sem_vecs.detach().cpu().numpy()).to_csv(os.path.join(embeddings_path,str(epoch)+'_Q2_sem_vecs.csv'))
 
                             Q2_loss = torch.mean(criterion_Q2(Q_prediction, Q2_sem_vecs))                                
-
                             print('Check if we recover the one-hot that was used to draw the continuously valued vector')                                
                             Q2_recovers_child = torch.eq(torch.argmax(selected_referents, dim=1), one_hot_classify_sem_vector(Q2_sem_vecs, word_means)).cpu().numpy().tolist()                                
                                                                                                                 
